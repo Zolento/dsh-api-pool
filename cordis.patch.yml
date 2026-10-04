@@ -1,0 +1,5 @@
+# dsh-api-pool bundle patch — inserts the host plugin into the composing profile.
+# The browser half is discovered from package.json's `dsh.client`, not from here.
+- insert:
+    - id: dsh-api-pool
+      name: dsh-api-pool
