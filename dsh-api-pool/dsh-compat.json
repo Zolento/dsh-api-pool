@@ -1,0 +1,25 @@
+{
+  "$comment": "Machine-readable compatibility pin. Updated only after the suite and acceptance pass against a new DSH build. `scripts/check-dsh.mjs` reads this file.",
+  "plugin": "dsh-api-pool",
+  "pluginVersion": "0.1.0",
+  "dsh": {
+    "version": "0.2.0-rc.2",
+    "tag": "dsh-v0.2.0-rc.2",
+    "commit": "639ed015397290b3745d163aafe02ffee4aa3f84"
+  },
+  "verifiedAt": "2026-10-04",
+  "seams": [
+    "ctx.settings.describe()/mutate(ns, pathOps) with volatile-path enforcement",
+    "ctx.credentials.resolve(ref)/set(ref, value)",
+    "ctx.commands.register({ name, description, handler })",
+    "client: ctx.slots.inject('settings.section', ...) / slots.register",
+    "client: ctx.configForms.get(ns) + SettingsPathOpView {op:'set'|'unset', path}",
+    "client: window.__ModuleLoader__.load({ id, factory(require) })",
+    "package.json: dsh.bundle.patch, dsh.client.platform, exports['./client']",
+    "llm-pi-ai provider profile shape (displayName/api/baseURL/apiKeyEnv/models)",
+    "settings document: - id: llm-pi-ai with config.providers replaced per layer"
+  ],
+  "runtimeDependencies": [
+    "@deepseek-ai/schemastery@3.18.4"
+  ]
+}

@@ -211,7 +211,54 @@ ACCEPTANCE_BOOT=1 DSH_API_POOL_LIVE=1 bash scripts/acceptance.sh   # 再发一�
 - **配额探测针对 LiteLLM 风格代理**：`/key/info`、`/user/info` 与 `x-litellm-*` 头；
   其他代理下探测自然失败，仅退化为无配额信息（不影响故障切换）。
 
-## 版本固定
+## 版本固定与适配新 DSH
 
 本插件针对 **DSH `0.2.0-rc.2`**（源码 tag `dsh-v0.2.0-rc.2`，commit
 `639ed015397290b3745d163aafe02ffee4aa3f84`）开发与验证，未修改 DSH 本体源码。
+
+### 版本记录规则
+
+| 记录 | 位置 | 含义 |
+| --- | --- | --- |
+| 插件版本 | `package.json` `version`（SemVer） | 本插件自己的功能/修复 |
+| DSH 兼容性 | `dsh-compat.json` | 已**验证**通过的 DSH 版本 + tag + commit + 依赖的接缝清单 |
+| 发版 tag | git annotated tag `v<插件版本>-dsh<DSH版本>` | 例如 `v0.1.0-dsh0.2.0-rc.2`；一眼看出这条 tag 验证的是哪个 DSH |
+| 变更记录 | `CHANGELOG.md` | 每个版本改了什么、验证了什么 |
+
+分支建议：
+
+- `main`：跟随**最新已验证**的 DSH 线；DSH 升级验证通过后在此打新 tag。
+- `dsh/<DSH版本>`（例如 `dsh/0.2.0-rc.2`）：一旦开始适配更新的 DSH 线，就从对应
+  commit 拉出这条维护分支，旧线的小修复 cherry-pick 回去，互不干扰。
+- 适配过程中可以开临时分支 `adapt/dsh-<新版本>`，验证通过后再合回 `main` 并打 tag。
+
+### 升级 DSH 的标准流程
+
+```bash
+# 1. 看当前是否已经漂移（会同时检查安装版与源码 checkout）
+npm run check-dsh
+
+# 2. 切到新的 DSH 源码 tag（不改 DSH 本体）
+git -C ~/code/deepseek-harness checkout <new-tag>
+dsh --version
+
+# 3. 全量验证
+npm test
+ACCEPTANCE_BOOT=1 DSH_API_POOL_LIVE=1 bash scripts/acceptance.sh
+
+# 4. 若失败：按 dsh-compat.json 的 seams 清单逐项核对（设置/凭据/命令接口、
+#    浏览器 slots 与 configForms、bundle/client 清单字段、llm-pi-ai profile 形状、
+#    设置文档中 - id: llm-pi-ai 的替换语义）
+
+# 5. 通过后更新记录并发版
+#    - dsh-compat.json: version/tag/commit/verifiedAt
+#    - package.json:    version（如 0.1.1 或 0.2.0）
+#    - CHANGELOG.md:    新条目
+git add -A && git commit -m "adapt to DSH <new-version>"
+git tag -a "v0.1.1-dsh<new-version>" -m "dsh-api-pool 0.1.1 for DSH <new-version>"
+```
+
+> 为什么不一上来就用 `peerDependencies` 卡死 DSH 版本：本插件运行时不 import 任何
+> DSH 包（只通过 `ctx` 服务与 `@deepseek-ai/schemastery` 交互），写死 peer 会在 DSH
+> 升级时直接拒绝安装，反而挡住「先跑起来看看哪里坏了」。因此改成
+> **显式 pin + 可执行的漂移检查**：`npm run check-dsh` 失败即提醒重新验证。
