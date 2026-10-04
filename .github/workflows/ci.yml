@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: ['main', 'dsh/**', 'adapt/**']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      # On a runner without DSH installed this reports notes rather than drift;
+      # on a self-hosted runner with DSH present it fails when the pin is stale.
+      - run: npm run check-dsh
