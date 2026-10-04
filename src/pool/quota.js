@@ -13,7 +13,7 @@
  */
 
 import { parseTimestamp } from './kinds.js'
-import { endpointState } from './state.js'
+import { endpointState, observeWindowSpend } from './state.js'
 
 /** Strip `/v1` and any trailing slash to reach the service root. */
 export function rootURL(baseURL) {
@@ -120,6 +120,9 @@ export async function refreshQuotas(specs, state, resolveKey, config, now = Date
     for (const [key, value] of Object.entries(result.discovered)) {
       if (value !== undefined && value !== null) entry[key] = value
     }
+    // Fold the fresh binding spend into the 24h-window accounting (see
+    // observeWindowSpend: the cumulative figure is built from these maxima).
+    observeWindowSpend(state, entry, entry.spend, entry.budgetResetAt, now)
     config.onEvent?.('quota_refresh', {
       endpoint: result.spec.name,
       spend: entry.spend,

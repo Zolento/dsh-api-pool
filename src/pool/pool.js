@@ -11,7 +11,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { classifyTransportError, summaryOf } from './kinds.js'
-import { emptyState, endpointState, onFailure, onSuccess, recordRequest, applyRecovery, recentRequests, timeUntilAvailable, availabilityOf, totalSpendOf } from './state.js'
+import { emptyState, endpointState, onFailure, onSuccess, recordRequest, applyRecovery, recentRequests, timeUntilAvailable, availabilityOf, totalSpendOf, endpointSpendOf, recordUsage } from './state.js'
 import { selectEndpoint } from './select.js'
 import { refreshQuotas } from './quota.js'
 
@@ -229,8 +229,10 @@ export class ApiPool {
         rpmLimit: entry.rpmLimit ?? spec.rpmLimit,
         spend: entry.spend,
         maxBudget: entry.maxBudget,
-        /** Cumulative provider-reported spend for this endpoint (0 when unknown). */
-        totalSpend: Number.isFinite(entry.totalSpend) ? entry.totalSpend : 0,
+        /** Cumulative spend (banked windows + current window max) and exact tokens. */
+        totalSpend: endpointSpendOf(entry),
+        totalTokensIn: Number.isFinite(entry.totalTokensIn) ? entry.totalTokensIn : 0,
+        totalTokensOut: Number.isFinite(entry.totalTokensOut) ? entry.totalTokensOut : 0,
         lastError: entry.lastError,
         lastErrorKind: entry.lastErrorKind,
         totalRequests: entry.totalRequests,
@@ -246,7 +248,21 @@ export class ApiPool {
    * @returns {{ spendUsd: number, since: number|undefined }}
    */
   totals() {
-    return { spendUsd: totalSpendOf(this.state), since: this.state.spendSince }
+    return {
+      spendUsd: totalSpendOf(this.state),
+      tokensIn: Number.isFinite(this.state.totalTokensIn) ? this.state.totalTokensIn : 0,
+      tokensOut: Number.isFinite(this.state.totalTokensOut) ? this.state.totalTokensOut : 0,
+      since: this.state.spendSince,
+    }
+  }
+
+  /**
+   * Accumulate one streamed response's token usage against its endpoint.
+   * @param {string} name endpoint name from the config.
+   * @param {{inputTokens?: number, outputTokens?: number}} usage parsed usage.
+   */
+  recordUsage(name, usage) {
+    if (recordUsage(this.state, name, usage)) this.persist()
   }
 
   /**

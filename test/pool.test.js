@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ErrorKind } from '../src/pool/kinds.js'
-import { onFailure, endpointState } from '../src/pool/state.js'
+import { onFailure, endpointState, observeWindowSpend } from '../src/pool/state.js'
 import { onSuccess } from '../src/pool/state.js'
 
 function poolConfig(endpoints, extra = {}) {
@@ -174,19 +174,26 @@ test('availability lists permanently disabled endpoints', () => {
   assert.equal(row.availableInMs, Infinity)
 })
 
-test('status and totals report cumulative spend with safe fallbacks', () => {
+test('status and totals report the window-based cumulative figures', () => {
   const pool = new ApiPool({ config: poolConfig(['a', 'b']), resolveKey: async () => 'key', now: () => 1000 })
-  const before = pool.status()
-  assert.deepEqual(before.map(row => row.totalSpend), [0, 0], 'unknown spend reports 0, never undefined')
-  assert.deepEqual(pool.totals(), { spendUsd: 0, since: undefined })
+  assert.deepEqual(pool.totals(), { spendUsd: 0, tokensIn: 0, tokensOut: 0, since: undefined }, 'unknown figures report 0, never undefined')
+  assert.deepEqual(pool.status().map(row => [row.totalSpend, row.totalTokensIn, row.totalTokensOut]), [[0, 0, 0], [0, 0, 0]])
 
-  onSuccess(pool.state, pool.specs[0], 1000, 5, { 'x-litellm-response-cost': '0.125' })
-  onSuccess(pool.state, pool.specs[1], 2000, 5, { 'x-litellm-response-cost': '0.375' })
+  const entryA = endpointState(pool.state, 'a')
+  const windowOne = 1_700_000_000_000
+  observeWindowSpend(pool.state, entryA, 40, windowOne, 1000)
+  observeWindowSpend(pool.state, entryA, 62, windowOne, 2000)
+  observeWindowSpend(pool.state, entryA, 10, windowOne + 86_400_000, 3000)   // window reset → bank 62
+  pool.recordUsage('b', { inputTokens: 1_000, outputTokens: 500 })
 
   const rows = pool.status()
-  assert.equal(rows[0].totalSpend, 0.125)
-  assert.equal(rows[1].totalSpend, 0.375)
-  assert.deepEqual(pool.totals(), { spendUsd: 0.5, since: 1000 })
+  assert.equal(rows[0].totalSpend, 72)
+  assert.equal(rows[1].totalSpend, 0)
+  assert.equal(rows[1].totalTokensIn, 1_000)
+  assert.deepEqual(
+    { spendUsd: pool.totals().spendUsd, tokensIn: pool.totals().tokensIn, tokensOut: pool.totals().tokensOut },
+    { spendUsd: 72, tokensIn: 1_000, tokensOut: 500 },
+  )
 })
 
 test('loading state drops stale quota hints but keeps counters and cooldowns', () => {

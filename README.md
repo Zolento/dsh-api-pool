@@ -128,21 +128,36 @@ dsh-api-pool — 4 endpoint(s), strategy=least_loaded
   relay: http://127.0.0.1:8765/v1 (owned by this process)
 ```
 
-- `window=` 是**当前预算窗口**的消费/上限（来自 `/key/info` 或 `/user/info`，
-  会随 `budget_reset_at` 清零）；`cum=` 是本插件自己累加的**累计消费**，永不清零；
-- 累计值来自每个成功响应的 `x-litellm-response-cost` 头，逐端点累加并从池级总计；
-  **拿不到该头就计 0**（不会报错、不会出现 NaN）；累计值随 `state.json` 持久化，
-  端点被删除后池级总计仍然保留；
+- `window=` 是**当前预算窗口**的消费/上限（来自 `/key/info` 或 `/user/info`，随
+  `budget_reset_at` 清零）；
+- `cum=` 是**窗口最大值累计**，永不清零（详见下一节）。它随 `state.json` 持久化，
+  端点从配置里删除后池级总计仍然保留；
 - 每个端点后缀 `last=` 是最近一次失败分类；`quota(NN%)` 表示探测到预算已用比例；
 - `capacity` 是当前可直接使用的端点数；只要有端点处于冷却/配额禁用，就给出
   `next recovery`（**卡在哪个端点、还有多久**）——这正是「全端点不可用」时请求在等的东西；
 - 全不可用时改成 `blocked: no endpoint available — waiting for <名字> to recover in <时间> (<原因>, last=<错误>)`；
 - 永久禁用（401/403）的端点单独列出 `permanently disabled: ...` 并提示修凭据。
-- `GET /healthz` 也带 `totalSpend` / `spendSince`，便于外部脚本读取。
+- `GET /healthz` 也带 `totalSpend` / `spendSince` 与每个端点的精确 token 计数。
 
-> 关于 `x-litellm-key-spend`：它是**当前预算窗口**的 key 消费（有 `max_budget` 时会在
-> 窗口重置清零）；如果这个 key 根本没有预算（例如 `SECONDARY_API_KEY`），它就变成一条
-> 只增不减的累计值——所以不能拿它当「累计消费」，本插件的 `cum=` 才是。
+### `cum=` 是怎么来的（窗口最大值累计）
+
+`cum` 用的是**代理自己的窗口消费**，不是我们按 token 估的价：
+
+1. 一个预算窗口内消费只会增长，所以记录该端点**观察到的最大 window spend**；
+2. 窗口结束时（消费数值回落，或 `budget_reset_at` 前移）把上一窗口的最大值**结转**进累计，
+   然后开始新窗口；
+3. 端点 `cum = 已结转窗口之和 + 当前窗口最大值`；池级 `cum = 所有已结转窗口之和 +
+   当前各端点窗口最大值之和`。因此池级总计不会因为某个端点被删除而丢失历史。
+
+> **⚠️ 这个特性有前提，`cum` 仅供参考：**
+> - 只有当 API 会**周期性重置预算窗口**时才成立（本项目验证的几个 key 是 **24h** 轮转）。
+>   API 若不重置窗口，消费只会在当前窗口内一直增长（等价于 lifetime）；若重置比我们的
+>   观察更频繁，则可能少计。
+> - 窗口消费是 **key 或账号级别**的：同一凭据被其他客户端使用时会计入；两个端点若绑定到
+>   同一个账号级预算，会各自记一份（池级总计会重复计算这部分）。
+> - 它**不是账单**，只用于大致判断「这个池到现在消耗了多少」，精确对账请以服务商账单为准。
+>
+> 代码里的同一份说明见 `src/pool/state.js` 的 `observeWindowSpend`（含实现与限制注释）。
 
 ## 配置参考
 
@@ -153,6 +168,7 @@ dsh-api-pool — 4 endpoint(s), strategy=least_loaded
 | `enabled` | `true` | 池总开关（关闭时中继返回 503） |
 | `strategy` | `least_loaded` | `least_loaded` \| `priority` \| `round_robin` |
 | `models` | `['deepseek-flash']` | provider 暴露的模型列表（逗号分隔编辑） |
+| `streamUsage` | `true` | 转发时注入 `stream_options.include_usage`，让流式响应也返回精确 token 用量（仅用于 `/healthz` 的计数） |
 | `api` | `openai-completions` | provider profile 的协议 |
 | `reasoning` | `high` | provider profile 的默认思考强度 |
 | `thinkingFormat` | `deepseek` | provider profile 的 `compat.thinkingFormat` |

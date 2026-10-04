@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { emptyState, endpointState, onFailure, onSuccess, recordRequest, isUnavailable, timeUntilAvailable, availabilityOf, quotaFromHeaders, quotaExhausted, responseCost, totalSpendOf } from '../src/pool/state.js'
+import { emptyState, endpointState, onFailure, onSuccess, recordRequest, isUnavailable, timeUntilAvailable, availabilityOf, quotaFromHeaders, quotaExhausted, totalSpendOf, endpointSpendOf, observeWindowSpend, recordUsage } from '../src/pool/state.js'
 import { selectEndpoint } from '../src/pool/select.js'
 import { ErrorKind } from '../src/pool/kinds.js'
 
@@ -182,35 +182,107 @@ test('a probe-found 100% budget makes the endpoint unavailable without any error
   assert.equal(availabilityOf(state, target, 1000, 60_000).reason, 'quota')
 })
 
-test('responseCost reads the provider cost and counts anything missing as 0', () => {
-  assert.equal(responseCost({ 'x-litellm-response-cost': '1.1999999999999999e-05' }), 1.1999999999999999e-05)
-  assert.equal(responseCost({ 'x-litellm-response-cost-original': '0.5' }), 0.5)
-  assert.equal(responseCost({}), 0, 'a deployment that reports no cost must not break anything')
-  assert.equal(responseCost(undefined), 0)
-  assert.equal(responseCost({ 'x-litellm-response-cost': 'not-a-number' }), 0)
-  assert.equal(responseCost({ 'x-litellm-response-cost': '-3' }), 0)
-  assert.equal(responseCost(new Headers({ 'x-litellm-response-cost': '0.25' })), 0.25, 'a Headers instance works too')
-})
-
-test('successful calls accumulate per-endpoint and pool-wide spend', () => {
+test('successful calls accumulate per-endpoint and pool-wide counters', () => {
   const state = emptyState()
-  const a = spec('a')
-  const b = spec('b')
-  assert.equal(state.totalSpend, 0)
-  assert.equal(endpointState(state, 'a').totalSpend, 0)
+  assert.equal(state.bankedSpend, 0)
+  assert.equal(endpointSpendOf(endpointState(state, 'a')), 0)
+  assert.equal(endpointState(state, 'a').totalTokensIn, 0)
 
-  onSuccess(state, a, 1000, 10, { 'x-litellm-response-cost': '0.25' })
-  onSuccess(state, b, 1000, 10, { 'x-litellm-response-cost': '0.5' })
-  onSuccess(state, a, 2000, 10, {})                            // no cost header → adds 0
-  onSuccess(state, a, 3000, 10, { 'x-litellm-response-cost': 'garbage' })
+  onSuccess(state, spec('a'), 1000, 10, {})                        // health only
+  onSuccess(state, spec('b'), 1000, 10, {})
+  recordUsage(state, 'a', { inputTokens: 10, outputTokens: 5 })
+  assert.equal(recordUsage(state, 'a', { inputTokens: undefined, outputTokens: 'x' }), false)
 
-  assert.equal(endpointState(state, 'a').totalSpend, 0.25)
-  assert.equal(endpointState(state, 'b').totalSpend, 0.5)
-  assert.equal(totalSpendOf(state), 0.75)
-  assert.equal(state.spendSince, 1000)
+  assert.equal(endpointState(state, 'a').totalTokensIn, 10)
+  assert.equal(endpointState(state, 'a').totalTokensOut, 5)
+  assert.equal(state.totalTokensIn, 10)
+  assert.equal(state.totalTokensOut, 5)
+  assert.equal(state.successes, undefined, 'no accidental top-level counter')
 
-  // The pool total is authoritative even before any endpoint entry exists.
+  // The pool total helpers tolerate junk rather than throwing.
   assert.equal(totalSpendOf(emptyState()), 0)
   assert.equal(totalSpendOf(undefined), 0)
-  assert.equal(totalSpendOf({ totalSpend: 'nope' }), 0)
+  assert.equal(totalSpendOf({ bankedSpend: 'nope', endpoints: { a: { windowMaxSpend: 'x' } } }), 0)
+})
+
+test('cum keeps the largest window spend and banks it when the window resets', () => {
+  const state = emptyState()
+  const entry = endpointState(state, 'a')
+  const windowOne = 1_700_000_000_000
+  const windowTwo = windowOne + 86_400_000
+
+  observeWindowSpend(state, entry, 40, windowOne, 1000)
+  assert.equal(endpointSpendOf(entry), 40)
+  observeWindowSpend(state, entry, 55, windowOne, 2000)      // grows inside the window
+  assert.equal(endpointSpendOf(entry), 55)
+
+  const rolled = observeWindowSpend(state, entry, 12, windowTwo, 3000)   // reset: spend drops
+  assert.deepEqual(rolled, { rolled: true, banked: 55 })
+  assert.equal(endpointSpendOf(entry), 67, 'banked window + the new window maximum')
+  assert.equal(totalSpendOf(state), 67)
+  assert.equal(state.spendSince, 1000)
+
+  // A budgetResetAt that moves forward also starts a new window.
+  observeWindowSpend(state, entry, 30, windowTwo, 4000)
+  observeWindowSpend(state, entry, 5, windowTwo + 86_400_000, 5000)
+  assert.equal(endpointSpendOf(entry), 55 + 30 + 5, 'each completed window contributes its own maximum')
+  assert.equal(totalSpendOf(state), 90)
+})
+
+test('the provider per-response cost is never treated as our bill', () => {
+  const state = emptyState()
+  onSuccess(state, spec('a'), 1000, 5, { 'x-litellm-response-cost': '0.25' })
+  assert.equal(totalSpendOf(state), 0)
+  assert.equal(state.spendSince, undefined)
+})
+
+test('an observed key-scope spend does feed the window accounting', () => {
+  const state = emptyState()
+  // No user-scope binding yet, so the key header is the binding figure.
+  onSuccess(state, spec('a'), 1000, 5, { 'x-litellm-key-spend': '9.5' })
+  assert.equal(totalSpendOf(state), 9.5)
+  onSuccess(state, spec('a'), 2000, 5, { 'x-litellm-key-spend': '9.8' })
+  assert.equal(totalSpendOf(state), 9.8, 'the window maximum, not the sum')
+})
+
+test('incomplete observations are ignored rather than corrupting the windows', () => {
+  const state = emptyState()
+  const entry = endpointState(state, 'a')
+  observeWindowSpend(state, entry, Number.NaN, undefined, 1000)
+  observeWindowSpend(state, entry, -5, undefined, 1000)
+  assert.equal(totalSpendOf(state), 0)
+  assert.equal(state.spendSince, undefined)
+})
+
+test('token counting never invents dollars', () => {
+  const state = emptyState()
+  recordUsage(state, 'a', { inputTokens: 1_000_000, outputTokens: 500_000 })
+  assert.equal(state.totalTokensIn, 1_000_000)
+  assert.equal(state.totalTokensOut, 500_000)
+  assert.equal(totalSpendOf(state), 0, 'dollars come from window spend only')
+  assert.equal(state.spendSince, undefined)
+})
+
+test('usage with malformed fields counts as 0', () => {
+  const state = emptyState()
+  assert.equal(recordUsage(state, 'a', { inputTokens: 10, outputTokens: 5 }), true)
+  assert.equal(state.totalTokensIn, 10)
+  assert.equal(recordUsage(state, 'a', { inputTokens: 'x', outputTokens: Number.NaN }), false)
+  assert.equal(state.totalTokensIn, 10)
+})
+
+test('token usage accumulates per endpoint and pool-wide, ignoring malformed input', () => {
+  const state = emptyState()
+  assert.equal(recordUsage(state, 'a', { inputTokens: 100, outputTokens: 20 }), true)
+  assert.equal(recordUsage(state, 'a', { inputTokens: 50, outputTokens: 5 }), true)
+  assert.equal(recordUsage(state, 'b', { inputTokens: undefined, outputTokens: Number.NaN }), false)
+  assert.equal(recordUsage(state, 'b', {}), false)
+  assert.equal(recordUsage(state, 'b', undefined), false)
+
+  const entry = endpointState(state, 'a')
+  assert.equal(entry.totalTokensIn, 150)
+  assert.equal(entry.totalTokensOut, 25)
+  assert.equal(state.totalTokensIn, 150)
+  assert.equal(state.totalTokensOut, 25)
+  assert.equal(endpointState(state, 'b').totalTokensIn, 0)
 })

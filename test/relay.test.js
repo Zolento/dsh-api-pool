@@ -190,3 +190,32 @@ test('healthz reports cumulative spend with a zero fallback', async () => {
     await close()
   }
 })
+
+test('streamed usage is recorded even though streaming carries no cost header', async () => {
+  let sawIncludeUsage = false
+  const good = await upstream((req, res, body) => {
+    const parsed = JSON.parse(body)
+    sawIncludeUsage = parsed.stream_options?.include_usage === true
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    res.write('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n')
+    if (sawIncludeUsage) {
+      res.write('data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":4,"total_tokens":15}}\n\n')
+    }
+    res.end('data: [DONE]\n\n')
+  })
+  const { relay, pool, close } = await makeRelay([{ name: 'a', baseURL: good.url, apiKey: 'k' }])
+  try {
+    const result = await post(relay, { model: 'deepseek-flash', messages: [], stream: true })
+    assert.equal(result.status, 200)
+    assert.equal(sawIncludeUsage, true, 'the relay must ask for streamed usage')
+    await new Promise(resolve => setTimeout(resolve, 100))
+
+    const totals = pool.totals()
+    assert.equal(totals.tokensIn, 11)
+    assert.equal(totals.tokensOut, 4)
+    assert.deepEqual(pool.status().map(row => [row.totalTokensIn, row.totalTokensOut]), [[11, 4]])
+  } finally {
+    await close()
+    await good.close()
+  }
+})
