@@ -52,10 +52,14 @@ function delay(ms, signal) {
 }
 
 /**
- * Persist pool state next to the plugin, tolerating concurrent readers and a
- * crashed writer. The lock is advisory: it removes a lock directory older than
- * ten seconds so a killed process cannot wedge the pool.
+ * Endpoint fields that are a *fetched hint* rather than device state. They are
+ * dropped when state is loaded; see {@link StateStore.load}.
  */
+const QUOTA_HINT_FIELDS = Object.freeze([
+  'spend', 'maxBudget', 'budgetDuration', 'budgetResetAt', 'quotaSource', 'quotaCheckedAt',
+])
+
+/** Persist pool state next to the plugin; writes are atomic and lock-free. */
 export class StateStore {
   constructor(file) {
     this.file = file
@@ -64,13 +68,24 @@ export class StateStore {
   /** Read the persisted state, or an empty one when absent/corrupt. */
   load() {
     if (!existsSync(this.file)) return emptyState()
+    let parsed
     try {
-      const parsed = JSON.parse(readFileSync(this.file, 'utf8'))
-      if (typeof parsed !== 'object' || parsed === null || typeof parsed.endpoints !== 'object') return emptyState()
-      return { ...emptyState(), ...parsed }
+      parsed = JSON.parse(readFileSync(this.file, 'utf8'))
     } catch {
       return emptyState()
     }
+    if (typeof parsed !== 'object' || parsed === null || typeof parsed.endpoints !== 'object') return emptyState()
+    const state = { ...emptyState(), ...parsed }
+    // Quota facts are a hint fetched from the provider, and a stale
+    // (spend, maxBudget) pair — written by an older build, or measured in a
+    // window that has since reset — would keep marking a healthy endpoint
+    // "quota exhausted" for as long as it sits in the file. Drop them on load
+    // and let the startup probe repopulate; cooldowns keep their own expiry.
+    for (const entry of Object.values(state.endpoints)) {
+      if (typeof entry !== 'object' || entry === null) continue
+      for (const field of QUOTA_HINT_FIELDS) delete entry[field]
+    }
+    return state
   }
 
   /**
@@ -121,7 +136,7 @@ export class ApiPool {
     this.now = now
     this.sleep = sleep
     this.saveTimer = undefined
-    this.refreshing = false
+    this.refreshing = undefined
   }
 
   /** Normalized endpoint specs in configuration order. */
@@ -164,13 +179,17 @@ export class ApiPool {
    * @param {boolean} [force] probe now even inside the throttle window.
    */
   async refreshQuotas(force = false) {
-    if (this.refreshing) return
-    this.refreshing = true
-    try {
-      await refreshQuotas(this.specs, this.state, this.resolveKey, this.config, this.now(), force)
-    } finally {
-      this.refreshing = false
+    if (this.refreshing !== undefined) {
+      // Join the in-flight round instead of piling on; a forced caller (startup)
+      // still gets its own round afterwards, otherwise a request-triggered round
+      // could satisfy the guard and swallow the forced probe entirely.
+      await this.refreshing.catch(() => {})
+      if (!force) return
     }
+    const round = refreshQuotas(this.specs, this.state, this.resolveKey, this.config, this.now(), force)
+      .finally(() => { if (this.refreshing === round) this.refreshing = undefined })
+    this.refreshing = round
+    await round
   }
 
   /** Snapshot of endpoint health, for status surfaces. */

@@ -4,6 +4,23 @@
 每次发版都打一个形如 `v<插件版本>-dsh<DSH版本>` 的 tag，例如
 `v0.1.0-dsh0.2.0-rc.2`；DSH 升级后若尚未重新验证，不要沿用旧 tag。
 
+## v0.1.7 — dsh0.2.0-rc.2（2026-10-04）
+
+修复「重启后 `ustc-1` 仍显示 `quota(999%)  window=$1282.93/$100`」——根因是**配额快照被跨进程持久化**，
+而不是作用域修复本身失效：
+
+- `state.json` 会留下 `(spend, maxBudget, quotaSource)` 三元组。旧版本写下的错误口径
+  （key 的累计 spend 配 user 的预算）在重启时被**直接加载**；如果启动探测又失败
+  （本次 `/key/info` 被限流，`quotaCheckedAt` 仍停在重启前），这份坏数据就一直生效，
+  把健康端点长期判成「配额耗尽」。
+- `StateStore.load()` 现在**丢弃全部配额提示字段**（`spend` / `maxBudget` / `budgetDuration` /
+  `budgetResetAt` / `quotaSource` / `quotaCheckedAt`），交给启动与周期探测重新填充；
+  `cooldownUntil` / `disabledUntil`（自带到期时间，会自愈）与累计消费
+  `totalSpend` / `spendSince` 继续保留。
+- 启动的**强制探测不再被 in-flight 守卫吞掉**：强制调用会等当前轮结束后再跑一轮。
+- 配额探测改为**并行**（4 端点 8 次往返压成一轮），整轮读不到任何数据时把下次刷新缩短到 ≤60s。
+- 新增 4 个回归测试：坏数据加载即丢弃、陈旧配额对不再使端点不可用、强制轮不被合并吞掉、空轮缩短重试。
+
 ## v0.1.6 — dsh0.2.0-rc.2（2026-10-04）
 
 文档与界面示例去标识化：仓库内不再出现具体供应商名称，示例统一为
