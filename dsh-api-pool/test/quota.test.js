@@ -73,3 +73,15 @@ test('a forced refresh probes past the throttle window', async () => {
   await refreshQuotas(specs, state, resolveKey, config, 1002, true)
   assert.equal(calls, afterFirst + 2, 'a forced call probes both records')
 })
+
+test('a round that reads nothing schedules a quicker retry', async () => {
+  const { refreshQuotas } = await import('../src/pool/quota.js')
+  const { emptyState } = await import('../src/pool/state.js')
+  const state = emptyState()
+  const config = { quotaEnabled: true, quotaRefreshMs: 300_000, quotaProbeTimeoutMs: 1000, fetchImpl: async () => ({ ok: false }) }
+  const specs = [{ name: 'a', baseURL: 'https://api.example.com/v1', enabled: true }]
+
+  await refreshQuotas(specs, state, async () => 'k', config, 1000, true)
+
+  assert.equal(state.quotaNextRefreshAt, 61_000, 'a failed round must not wait the full interval')
+})

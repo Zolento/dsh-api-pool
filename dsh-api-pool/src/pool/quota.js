@@ -93,25 +93,39 @@ export async function refreshQuotas(specs, state, resolveKey, config, now = Date
   if (!config.quotaEnabled) return
   if (!force && now < state.quotaNextRefreshAt) return
   state.quotaNextRefreshAt = now + config.quotaRefreshMs
-  for (const spec of specs) {
-    if (spec.enabled === false) continue
+  // Probe endpoints in parallel: sequentially, four endpoints cost eight round
+  // trips and delay the moment quota is known (the startup probe is awaited by
+  // nothing, but the data is stale for that whole window).
+  const enabled = specs.filter(spec => spec.enabled !== false)
+  const results = await Promise.all(enabled.map(async (spec) => {
     let apiKey
     try {
       apiKey = await resolveKey(spec)
     } catch {
-      continue
+      return undefined
     }
     const discovered = await probeQuota(spec, apiKey, { fetchImpl: config.fetchImpl ?? fetch, timeoutMs: config.quotaProbeTimeoutMs })
-    if (discovered === undefined) continue
-    const entry = endpointState(state, spec.name)
-    for (const [key, value] of Object.entries(discovered)) {
+    return discovered === undefined ? undefined : { spec, discovered }
+  }))
+
+  let discoveredCount = 0
+  for (const result of results) {
+    if (result === undefined) continue
+    discoveredCount += 1
+    const entry = endpointState(state, result.spec.name)
+    for (const [key, value] of Object.entries(result.discovered)) {
       if (value !== undefined && value !== null) entry[key] = value
     }
     config.onEvent?.('quota_refresh', {
-      endpoint: spec.name,
+      endpoint: result.spec.name,
       spend: entry.spend,
       max_budget: entry.maxBudget,
       rpm_limit: entry.rpmLimit,
     })
+  }
+  // A round that read nothing (probe throttled, provider unreachable) must not
+  // leave the pool without quota facts for the whole interval.
+  if (enabled.length > 0 && discoveredCount === 0) {
+    state.quotaNextRefreshAt = now + Math.min(config.quotaRefreshMs, 60_000)
   }
 }

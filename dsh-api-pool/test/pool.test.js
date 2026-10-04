@@ -1,6 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { ApiPool, AllEndpointsUnavailable } from '../src/pool/pool.js'
+import { ApiPool, AllEndpointsUnavailable, StateStore } from '../src/pool/pool.js'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { ErrorKind } from '../src/pool/kinds.js'
 import { onFailure, endpointState } from '../src/pool/state.js'
 import { onSuccess } from '../src/pool/state.js'
@@ -184,4 +187,65 @@ test('status and totals report cumulative spend with safe fallbacks', () => {
   assert.equal(rows[0].totalSpend, 0.125)
   assert.equal(rows[1].totalSpend, 0.375)
   assert.deepEqual(pool.totals(), { spendUsd: 0.5, since: 1000 })
+})
+
+test('loading state drops stale quota hints but keeps counters and cooldowns', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-api-pool-state-'))
+  const file = join(dir, 'state.json')
+  writeFileSync(file, JSON.stringify({
+    version: 1,
+    totalSpend: 1.5,
+    spendSince: 123,
+    endpoints: {
+      a: {
+        spend: 1282.93, maxBudget: 100, quotaSource: 'user', budgetResetAt: 1730000000000, quotaCheckedAt: 1730000000000,
+        cooldownUntil: 9999999999999, totalSpend: 0.5, successes: 3,
+      },
+    },
+  }))
+
+  const state = new StateStore(file).load()
+  assert.equal(state.totalSpend, 1.5, 'cumulative spend is ours and must survive')
+  assert.equal(state.spendSince, 123)
+  assert.equal(state.endpoints.a.spend, undefined, 'a fetched quota hint must not be trusted across runs')
+  assert.equal(state.endpoints.a.maxBudget, undefined)
+  assert.equal(state.endpoints.a.quotaSource, undefined)
+  assert.equal(state.endpoints.a.quotaCheckedAt, undefined)
+  assert.equal(state.endpoints.a.cooldownUntil, 9999999999999, 'a cooldown carries its own expiry, so keep it')
+  assert.equal(state.endpoints.a.totalSpend, 0.5)
+  assert.equal(state.endpoints.a.successes, 3)
+})
+
+test('a stale persisted quota pair can no longer disable an endpoint', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-api-pool-state-'))
+  const file = join(dir, 'state.json')
+  writeFileSync(file, JSON.stringify({
+    version: 1,
+    endpoints: { a: { spend: 1282.93, maxBudget: 100, quotaSource: 'user', cooldownUntil: 0, disabledUntil: 0 } },
+  }))
+  const state = new StateStore(file).load()
+  const pool = new ApiPool({ config: poolConfig(['a']), state, resolveKey: async () => 'key', now: () => 1000 })
+  assert.equal(pool.availability().ready, 1)
+  assert.equal(pool.availability().blocked, false)
+  assert.equal(pool.status()[0].reason, 'ready')
+})
+
+test('a forced refresh still runs while another round is in flight', async () => {
+  let probes = 0
+  const fetchImpl = async (url) => {
+    probes += 1
+    await new Promise(resolve => setTimeout(resolve, 20))
+    return { ok: true, json: async () => (url.endsWith('/key/info') ? { info: { spend: 1, max_budget: 100, rpm_limit: 20 } } : {}) }
+  }
+  const config = {
+    ...poolConfig(['a']),
+    quotaEnabled: true, quotaRefreshMs: 300_000, quotaProbeTimeoutMs: 1000, fetchImpl,
+  }
+  const pool = new ApiPool({ config, resolveKey: async () => 'k', now: () => 1000 })
+
+  const first = pool.refreshQuotas(true)
+  const second = pool.refreshQuotas(true)   // arrives mid-flight
+  await Promise.all([first, second])
+
+  assert.equal(probes, 4, 'each forced round probes both records, so the second is not swallowed')
 })
