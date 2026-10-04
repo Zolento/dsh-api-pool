@@ -19,9 +19,9 @@ DSH 会话 LLM
   └─ llm-pi-ai adapter（协议 / 流式 / 工具翻译，DSH 自带，零改动）
        └─ provider profile: deepseek-pool  →  http://127.0.0.1:8765/v1
             └─ dsh-api-pool 中继（本插件）
-                 ├─ ustc    (USTC_API_KEY)
-                 ├─ ustc-1  (USTC_1_API_KEY)
-                 └─ ustc-2  (USTC_2_API_KEY)
+                 ├─ primary    (PRIMARY_API_KEY)
+                 ├─ secondary  (SECONDARY_API_KEY)
+                 └─ tertiary  (TERTIARY_API_KEY)
 ```
 
 ## 为什么是「本地中继」
@@ -76,7 +76,7 @@ dsh plugin --profile web remove dsh-api-pool
 `models`（默认 `deepseek-flash`）。选中它即可，池会在后台自动选端点。也可以把默认模型设为
 `deepseek-pool/deepseek-flash`（`agent-default-model`）。
 
-> 池的模型与「当前选中的 provider 模型」无关：例如你现在用 `ustc/deepseek-flash`，池默认
+> 池的模型与「当前选中的 provider 模型」无关：例如你现在选的是另一个 provider 的 `deepseek-flash`，池默认
 > 仍然是 `deepseek-flash`（因为 `models` 默认就是它）。每个端点还可以用
 > `endpoints[].model` 覆盖发给上游的模型名。
 
@@ -84,8 +84,8 @@ dsh plugin --profile web remove dsh-api-pool
 
 **Settings → API Pool** 页可以：
 
-- 添加端点：名称、Base URL（如 `https://api.llm.ustc.edu.cn/v1`）、key 引用
-  （环境变量名或凭据名，如 `USTC_API_KEY`）、可选模型覆盖、优先级、RPM 上限；
+- 添加端点：名称、Base URL（如 `https://api.example.com/v1`）、key 引用
+  （环境变量名或凭据名，如 `PRIMARY_API_KEY`）、可选模型覆盖、优先级、RPM 上限；
 - 启用 / 停用某个端点；
 - 删除端点；
 - 选择策略：`least_loaded`（默认，按 RPM 窗口负载）/ `priority` / `round_robin`；
@@ -118,13 +118,13 @@ DSH 只把 **Host 设置**开放给从 `127.0.0.1` / `localhost` 打开的页面
 
 ```
 dsh-api-pool — 4 endpoint(s), strategy=least_loaded
-  ustc    ready          rpm=0/20  window=$40.79/$100  cum=$12.345678  last=rate_limit
-  ustc-1  quota( 89%)    rpm=0/20  window=$89.26/$100  cum=$3.210000
-  ustc-2  ready          rpm=0/20  window=$32.16/$100  cum=$0.987654
-  ustc-3  ready          rpm=0/20  window=$0.00/$100   cum=$0.000000
+  primary    ready          rpm=0/20  window=$40.79/$100  cum=$12.345678  last=rate_limit
+  secondary  quota( 89%)    rpm=0/20  window=$89.26/$100  cum=$3.210000
+  tertiary  ready          rpm=0/20  window=$32.16/$100  cum=$0.987654
+  spare  ready          rpm=0/20  window=$0.00/$100   cum=$0.000000
   capacity: 3/4 ready now
   cumulative spend: $17.531332 since 2026-10-04T13:00:00.000Z
-  next recovery: ustc-1 in 4h30m (quota)
+  next recovery: secondary in 4h30m (quota)
   relay: http://127.0.0.1:8765/v1 (owned by this process)
 ```
 
@@ -141,7 +141,7 @@ dsh-api-pool — 4 endpoint(s), strategy=least_loaded
 - `GET /healthz` 也带 `totalSpend` / `spendSince`，便于外部脚本读取。
 
 > 关于 `x-litellm-key-spend`：它是**当前预算窗口**的 key 消费（有 `max_budget` 时会在
-> 窗口重置清零）；如果这个 key 根本没有预算（例如 `USTC_1_API_KEY`），它就变成一条
+> 窗口重置清零）；如果这个 key 根本没有预算（例如 `SECONDARY_API_KEY`），它就变成一条
 > 只增不减的累计值——所以不能拿它当「累计消费」，本插件的 `cum=` 才是。
 
 ## 配置参考
@@ -214,7 +214,7 @@ dsh-api-pool — 4 endpoint(s), strategy=least_loaded
   在每次调用后增量刷新，但 **key 作用域的 spend 不会写进 user 作用域的预算**；
 - 探测值优先于配置的 `rpmLimit`，用于 `least_loaded` 的负载计算。
 
-> 为什么要按作用域绑定：本代理对 `USTC_1_API_KEY` 返回的
+> 为什么要按作用域绑定：本代理对 `SECONDARY_API_KEY` 返回的
 > `/key/info` 是 `spend=$1281.80, max_budget=null`（key 只有累计消费），
 > 而 `/user/info` 才是真正生效的 `spend=$89.26 / max_budget=$100 / 24h`。
 > 如果把 key 的 spend 和 user 的 `max_budget` 拼在一起，比值会变成 12.8 倍，
