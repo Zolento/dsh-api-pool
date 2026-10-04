@@ -3,9 +3,13 @@
  *
  * Ported from AI-Scientist-v2 `api_pool.py::probe_quota` / `refresh_quotas`.
  * Quota is *discovered* from the LiteLLM-compatible `/key/info` and
- * `/user/info` endpoints; the binding budget is the candidate with the highest
- * spend ratio, and the RPM limit is the strictest one below "effectively
- * unlimited".
+ * `/user/info` endpoints. Two deliberate deviations from the Python original,
+ * forced by the observed proxy behaviour:
+ *
+ * 1. the binding budget is the **key** record's whenever it declares one, with
+ *    the user record only as a fallback (the original picked the highest spend
+ *    ratio, which mixes a user-scope `max_budget` with a key-scope `spend`);
+ * 2. the RPM limit is the strictest value below "effectively unlimited".
  */
 
 import { parseTimestamp } from './kinds.js'
@@ -48,28 +52,31 @@ export async function probeQuota(spec, apiKey, { fetchImpl = fetch, timeoutMs = 
   const keyRecord = keyInfo?.info
   const userRecord = userInfo?.user_info
   const merged = {}
-  const candidates = []
-  for (const [source, record] of [['key', keyRecord], ['user', userRecord]]) {
-    if (typeof record !== 'object' || record === null) continue
+  const candidateOf = (source, record) => {
+    if (typeof record !== 'object' || record === null) return undefined
     const maxBudget = Number(record.max_budget)
-    if (!Number.isFinite(maxBudget) || maxBudget <= 0) continue
-    candidates.push({
+    if (!Number.isFinite(maxBudget) || maxBudget <= 0) return undefined
+    return {
       quotaSource: source,
       maxBudget,
       spend: Number(record.spend ?? 0),
       budgetDuration: record.budget_duration,
       budgetResetAt: parseTimestamp(record.budget_reset_at),
-    })
+    }
   }
+  // The key record wins whenever it declares a budget: that is the per-key
+  // throttle this pool balances. The user record is the fallback for a key that
+  // declares none (on this proxy the budget may live only on one of the two,
+  // and their `spend` values are different scopes). Taking the "most used"
+  // record instead — as the Python original does — combines a user budget with a
+  // key spend and falsely exhausts healthy endpoints.
+  const binding = candidateOf('key', keyRecord) ?? candidateOf('user', userRecord)
+  if (binding !== undefined) Object.assign(merged, binding)
   const rpms = []
   for (const record of [keyRecord, userRecord]) {
     if (typeof record !== 'object' || record === null) continue
     const rpm = Number(record.rpm_limit)
     if (Number.isFinite(rpm) && rpm > 0 && rpm < 1e9) rpms.push(rpm)
-  }
-  if (candidates.length > 0) {
-    candidates.sort((left, right) => (right.spend / right.maxBudget) - (left.spend / left.maxBudget))
-    Object.assign(merged, candidates[0])
   }
   if (rpms.length > 0) merged.rpmLimit = Math.min(...rpms)
   if (Object.keys(merged).length === 0) return undefined
@@ -80,10 +87,11 @@ export async function probeQuota(spec, apiKey, { fetchImpl = fetch, timeoutMs = 
 /**
  * Refresh quota for every enabled endpoint, throttled by a shared deadline.
  * Undefined fields never overwrite a known value.
+ * @param {boolean} [force] probe now even inside the throttle window (startup).
  */
-export async function refreshQuotas(specs, state, resolveKey, config, now = Date.now()) {
+export async function refreshQuotas(specs, state, resolveKey, config, now = Date.now(), force = false) {
   if (!config.quotaEnabled) return
-  if (now < state.quotaNextRefreshAt) return
+  if (!force && now < state.quotaNextRefreshAt) return
   state.quotaNextRefreshAt = now + config.quotaRefreshMs
   for (const spec of specs) {
     if (spec.enabled === false) continue

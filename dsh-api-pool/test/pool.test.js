@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { ApiPool, AllEndpointsUnavailable } from '../src/pool/pool.js'
 import { ErrorKind } from '../src/pool/kinds.js'
+import { onFailure, endpointState } from '../src/pool/state.js'
 
 function poolConfig(endpoints, extra = {}) {
   return {
@@ -107,4 +108,64 @@ test('a credential failure also fails over', async () => {
   })
   assert.deepEqual(calls, ['b'])
   assert.equal(result.endpoint, 'b')
+})
+
+test('availability reports the endpoint a blocked request is waiting on', async () => {
+  const pool = new ApiPool({
+    config: poolConfig(['a', 'b']),
+    resolveKey: async () => 'key',
+    now: () => 1000,
+    sleep: async () => {},
+  })
+  await pool.execute(async (spec) => {
+    if (spec.name === 'a') throw failure(ErrorKind.RATE_LIMIT)
+    return { ok: true }
+  })
+
+  const capacity = pool.availability()
+  assert.equal(capacity.blocked, false)
+  assert.equal(capacity.ready, 1)
+  assert.equal(capacity.enabled, 2)
+  assert.equal(capacity.next.name, 'a')
+  assert.equal(capacity.next.reason, 'cooldown')
+  assert.equal(capacity.next.inMs, 1000)
+  assert.equal(capacity.next.lastErrorKind, ErrorKind.RATE_LIMIT)
+
+  const row = pool.status().find(candidate => candidate.name === 'a')
+  assert.equal(row.available, false)
+  assert.equal(row.reason, 'cooldown')
+  assert.equal(row.availableInMs, 1000)
+  assert.equal(row.state, 'cooldown(1s)')
+})
+
+test('availability marks the pool blocked when nothing is ready', async () => {
+  const pool = new ApiPool({
+    config: poolConfig(['a'], { maxAttemptsPerRequest: 1 }),
+    resolveKey: async () => 'key',
+    now: () => 1000,
+    sleep: async () => {},
+  })
+  await assert.rejects(() => pool.execute(async () => { throw failure(ErrorKind.RATE_LIMIT) }))
+
+  const capacity = pool.availability()
+  assert.equal(capacity.blocked, true)
+  assert.equal(capacity.ready, 0)
+  assert.equal(capacity.next.name, 'a')
+  assert.deepEqual(capacity.permanentlyDisabled, [])
+})
+
+test('availability lists permanently disabled endpoints', () => {
+  const pool = new ApiPool({ config: poolConfig(['a', 'b']), resolveKey: async () => 'key', now: () => 1000 })
+  onFailure(pool.state, pool.specs[0], endpointState(pool.state, 'a'), { kind: ErrorKind.AUTH, message: 'invalid key' }, 1000, pool.config)
+  const capacity = pool.availability()
+  assert.deepEqual(capacity.permanentlyDisabled, ['a'])
+  assert.equal(capacity.ready, 1)
+  assert.equal(capacity.blocked, false)
+  // Nothing is cooling down, so there is no "next recovery" to wait for.
+  assert.equal(capacity.next, undefined)
+
+  const row = pool.status().find(candidate => candidate.name === 'a')
+  assert.equal(row.available, false)
+  assert.equal(row.reason, 'auth')
+  assert.equal(row.availableInMs, Infinity)
 })

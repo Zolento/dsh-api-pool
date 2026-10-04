@@ -117,12 +117,21 @@ DSH 只把 **Host 设置**开放给从 `127.0.0.1` / `localhost` 打开的页面
 聊天里输入 `/api-pool`：
 
 ```
-dsh-api-pool — 3 endpoint(s), strategy=least_loaded
-  ustc    ready  rpm=0/20
-  ustc-1  cooldown(42s)  rpm=1/20  last=rate_limit
-  ustc-2  ready  rpm=0/20
+dsh-api-pool — 4 endpoint(s), strategy=least_loaded
+  ustc    ready          rpm=0/20  spend=$40.79/$100  last=rate_limit
+  ustc-1  quota( 89%)    rpm=0/20  spend=$89.26/$100
+  ustc-2  ready          rpm=0/20  spend=$32.16/$100
+  ustc-3  ready          rpm=0/20  spend=$0.00/$100
+  capacity: 3/4 ready now
+  next recovery: ustc-1 in 4h30m (quota)
   relay: http://127.0.0.1:8765/v1 (owned by this process)
 ```
+
+- 每个端点后缀 `last=` 是最近一次失败分类；`quota(NN%)` 表示探测到预算已用比例；
+- `capacity` 是当前可直接使用的端点数；只要有端点处于冷却/配额禁用，就给出
+  `next recovery`（**卡在哪个端点、还有多久**）——这正是「全端点不可用」时请求在等的东西；
+- 全不可用时改成 `blocked: no endpoint available — waiting for <名字> to recover in <时间> (<原因>, last=<错误>)`；
+- 永久禁用（401/403）的端点单独列出 `permanently disabled: ...` 并提示修凭据。
 
 ## 配置参考
 
@@ -184,13 +193,22 @@ dsh-api-pool — 3 endpoint(s), strategy=least_loaded
 
 ## 配额探测
 
-每个端点周期性（`quotaRefreshMs`）探测 `GET {root}/key/info` 与 `{root}/user/info`：
+每个端点周期性（`quotaRefreshMs`，启动时还会强制探测一次）探测
+`GET {root}/key/info` 与 `{root}/user/info`：
 
-- `spend` / `max_budget` / `budget_reset_at` / `rpm_limit`；
-- 取**使用率最高**的预算作为绑定预算；
+- 取 `spend` / `max_budget` / `budget_reset_at` / `rpm_limit`；
+- **绑定预算优先用 key 记录**，key 没有 `max_budget` 时才回退到 user 记录；
+- `rpm_limit` 取两者中较大但仍 < 1e9 的那个（视为「无限」的哨兵值会被忽略）；
 - 响应头 `x-litellm-key-spend` / `x-litellm-key-max-budget` / `x-litellm-key-rpm-limit`
-  会在每次调用后增量刷新；
+  在每次调用后增量刷新，但 **key 作用域的 spend 不会写进 user 作用域的预算**；
 - 探测值优先于配置的 `rpmLimit`，用于 `least_loaded` 的负载计算。
+
+> 为什么要按作用域绑定：本代理对 `USTC_1_API_KEY` 返回的
+> `/key/info` 是 `spend=$1281.80, max_budget=null`（key 只有累计消费），
+> 而 `/user/info` 才是真正生效的 `spend=$89.26 / max_budget=$100 / 24h`。
+> 如果把 key 的 spend 和 user 的 `max_budget` 拼在一起，比值会变成 12.8 倍，
+> 把一个健康端点判成「配额耗尽」并静默停用——这也是本插件偏离 Python 原版
+> 「取使用率最高者」的原因。
 
 ## 文件与日志
 
