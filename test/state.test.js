@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { emptyState, endpointState, onFailure, onSuccess, recordRequest, isUnavailable, timeUntilAvailable, availabilityOf, quotaFromHeaders, quotaExhausted, totalSpendOf, endpointSpendOf, observeWindowSpend, recordUsage } from '../src/pool/state.js'
+import { emptyState, endpointState, onFailure, onSuccess, recordRequest, isUnavailable, timeUntilAvailable, availabilityOf, quotaFromHeaders, quotaExhausted, totalDaySpendOf, daySpendOf, observeDaySpend, recordUsage } from '../src/pool/state.js'
 import { selectEndpoint } from '../src/pool/select.js'
 import { ErrorKind } from '../src/pool/kinds.js'
 
@@ -184,8 +184,7 @@ test('a probe-found 100% budget makes the endpoint unavailable without any error
 
 test('successful calls accumulate per-endpoint and pool-wide counters', () => {
   const state = emptyState()
-  assert.equal(state.bankedSpend, 0)
-  assert.equal(endpointSpendOf(endpointState(state, 'a')), 0)
+  assert.equal(daySpendOf(endpointState(state, 'a')), 0)
   assert.equal(endpointState(state, 'a').totalTokensIn, 0)
 
   onSuccess(state, spec('a'), 1000, 10, {})                        // health only
@@ -200,57 +199,71 @@ test('successful calls accumulate per-endpoint and pool-wide counters', () => {
   assert.equal(state.successes, undefined, 'no accidental top-level counter')
 
   // The pool total helpers tolerate junk rather than throwing.
-  assert.equal(totalSpendOf(emptyState()), 0)
-  assert.equal(totalSpendOf(undefined), 0)
-  assert.equal(totalSpendOf({ bankedSpend: 'nope', endpoints: { a: { windowMaxSpend: 'x' } } }), 0)
+  assert.equal(totalDaySpendOf(emptyState()), 0)
+  assert.equal(totalDaySpendOf(undefined), 0)
+  assert.equal(totalDaySpendOf({ endpoints: { a: { dayMaxSpend: 'x' } } }), 0)
 })
 
-test('cum keeps the largest window spend and banks it when the window resets', () => {
+test('cum is today\'s maximum, banked and reset at the local date change', () => {
   const state = emptyState()
   const entry = endpointState(state, 'a')
-  const windowOne = 1_700_000_000_000
-  const windowTwo = windowOne + 86_400_000
+  const day4 = new Date(2026, 9, 4, 22, 55).getTime()      // local 2026-10-04 22:55
+  const day5 = new Date(2026, 9, 5, 0, 5).getTime()        // local 2026-10-05 00:05
+  const banked = []
+  const record = { record: (date, usd, endpoints) => { banked.push({ date, usd, endpoints }); return true } }
 
-  observeWindowSpend(state, entry, 40, windowOne, 1000)
-  assert.equal(endpointSpendOf(entry), 40)
-  observeWindowSpend(state, entry, 55, windowOne, 2000)      // grows inside the window
-  assert.equal(endpointSpendOf(entry), 55)
+  observeDaySpend(state, entry, 40, day4, record)
+  assert.equal(state.dayKey, '2026-10-04')
+  assert.equal(daySpendOf(entry), 40)
+  observeDaySpend(state, entry, 55, day4, record)          // grows during the day
+  assert.equal(daySpendOf(entry), 55)
+  assert.equal(totalDaySpendOf(state), 55)
+  assert.equal(banked.length, 0, 'nothing is banked before midnight')
 
-  const rolled = observeWindowSpend(state, entry, 12, windowTwo, 3000)   // reset: spend drops
-  assert.deepEqual(rolled, { rolled: true, banked: 55 })
-  assert.equal(endpointSpendOf(entry), 67, 'banked window + the new window maximum')
-  assert.equal(totalSpendOf(state), 67)
-  assert.equal(state.spendSince, 1000)
+  observeDaySpend(state, entry, 3, day5, record)           // first observation after midnight
+  assert.deepEqual(banked, [{ date: '2026-10-04', usd: 55, endpoints: { a: 55 } }])
+  assert.equal(state.dayKey, '2026-10-05')
+  assert.equal(daySpendOf(entry), 3, 'cum restarts for the new day')
+  assert.equal(state.spendSince, day5, 'the day counters restart too')
+})
 
-  // A budgetResetAt that moves forward also starts a new window.
-  observeWindowSpend(state, entry, 30, windowTwo, 4000)
-  observeWindowSpend(state, entry, 5, windowTwo + 86_400_000, 5000)
-  assert.equal(endpointSpendOf(entry), 55 + 30 + 5, 'each completed window contributes its own maximum')
-  assert.equal(totalSpendOf(state), 90)
+test('a rollover that the record already holds resets without counting twice', () => {
+  const state = emptyState()
+  const entry = endpointState(state, 'a')
+  const day4 = new Date(2026, 9, 4, 23, 0).getTime()
+  const day5 = new Date(2026, 9, 5, 0, 1).getTime()
+  const record = { record: () => false }                   // file already has 2026-10-04
+
+  observeDaySpend(state, entry, 42, day4, record)
+  observeDaySpend(state, entry, 1, day5, record)
+  assert.equal(state.dayKey, '2026-10-05')
+  assert.equal(daySpendOf(entry), 1, 'the counter still resets for the new day')
 })
 
 test('the provider per-response cost is never treated as our bill', () => {
   const state = emptyState()
-  onSuccess(state, spec('a'), 1000, 5, { 'x-litellm-response-cost': '0.25' })
-  assert.equal(totalSpendOf(state), 0)
+  onSuccess(state, spec('a'), new Date(2026, 9, 4, 12, 0).getTime(), 5, { 'x-litellm-response-cost': '0.25' })
+  assert.equal(totalDaySpendOf(state), 0)
   assert.equal(state.spendSince, undefined)
 })
 
-test('an observed key-scope spend does feed the window accounting', () => {
+test('an observed key-scope spend feeds today\'s maximum', () => {
   const state = emptyState()
+  const now = new Date(2026, 9, 4, 12, 0).getTime()
   // No user-scope binding yet, so the key header is the binding figure.
-  onSuccess(state, spec('a'), 1000, 5, { 'x-litellm-key-spend': '9.5' })
-  assert.equal(totalSpendOf(state), 9.5)
-  onSuccess(state, spec('a'), 2000, 5, { 'x-litellm-key-spend': '9.8' })
-  assert.equal(totalSpendOf(state), 9.8, 'the window maximum, not the sum')
+  onSuccess(state, spec('a'), now, 5, { 'x-litellm-key-spend': '9.5' })
+  assert.equal(totalDaySpendOf(state), 9.5)
+  onSuccess(state, spec('a'), now + 1000, 5, { 'x-litellm-key-spend': '9.8' })
+  assert.equal(totalDaySpendOf(state), 9.8, 'today\'s maximum, not the sum')
 })
 
-test('incomplete observations are ignored rather than corrupting the windows', () => {
+test('incomplete observations are ignored rather than corrupting the day', () => {
   const state = emptyState()
   const entry = endpointState(state, 'a')
-  observeWindowSpend(state, entry, Number.NaN, undefined, 1000)
-  observeWindowSpend(state, entry, -5, undefined, 1000)
-  assert.equal(totalSpendOf(state), 0)
+  const now = new Date(2026, 9, 4, 12, 0).getTime()
+  observeDaySpend(state, entry, Number.NaN, now)
+  observeDaySpend(state, entry, -5, now)
+  assert.equal(totalDaySpendOf(state), 0)
   assert.equal(state.spendSince, undefined)
 })
 
@@ -259,7 +272,7 @@ test('token counting never invents dollars', () => {
   recordUsage(state, 'a', { inputTokens: 1_000_000, outputTokens: 500_000 })
   assert.equal(state.totalTokensIn, 1_000_000)
   assert.equal(state.totalTokensOut, 500_000)
-  assert.equal(totalSpendOf(state), 0, 'dollars come from window spend only')
+  assert.equal(totalDaySpendOf(state), 0, 'dollars come from the provider spend only')
   assert.equal(state.spendSince, undefined)
 })
 

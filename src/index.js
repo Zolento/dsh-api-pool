@@ -20,6 +20,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { Config, plainConfig, resolvePoolConfig } from './config.js'
 import { ApiPool, StateStore } from './pool/pool.js'
+import { RolloverLog } from './pool/rollover.js'
 import { EventLog } from './pool/events.js'
 import { Relay } from './relay.js'
 import { buildProviderProfile, ensureProviderProfile, jsonEqual, removeProviderProfile, storedProfile } from './provider.js'
@@ -128,6 +129,9 @@ export function apply(ctx, config) {
     logSuccesses: plainConfig(config).logSuccesses === true,
   })
   const store = new StateStore(join(dir, 'state.json'))
+  // Durable record of banked days: the authority on what a daily rollover has
+  // already booked, so a restart or a second process cannot double-count.
+  const rollover = new RolloverLog(join(dir, 'rollovers.json'))
   // Captured at apply time: re-resolving it during disposal can return
   // undefined once the registry is torn down, which would silently leave the
   // published provider profile behind in the user's settings document.
@@ -247,6 +251,7 @@ export function apply(ctx, config) {
       store,
       events,
       resolveKey,
+      rollover,
     })
 
     // Probe once at startup, past the throttle: persisted quota may have been
@@ -354,6 +359,13 @@ export function apply(ctx, config) {
       handler: () => {
         const pool = runtime.pool
         if (pool === undefined) return { kind: 'success', text: 'api-pool: still starting' }
+        // Bank the previous local day if midnight has passed since we last
+        // counted; the rollover record makes a repeat harmless.
+        const rolloverResult = pool.rolloverNow()
+        if (rolloverResult.rolled !== undefined) {
+          ctx.logger.info(`api-pool: banked ${rolloverResult.rolled} — $${rolloverResult.amount.toFixed(4)}`
+            + `${rolloverResult.alreadyRecorded ? ' (already recorded; counter reset only)' : ''}`)
+        }
         const lines = [`dsh-api-pool — ${pool.specs.length} endpoint(s), strategy=${pool.config.strategy}`]
         for (const row of pool.status()) {
           const window = Number.isFinite(row.spend) && Number.isFinite(row.maxBudget) && row.maxBudget > 0

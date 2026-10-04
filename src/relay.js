@@ -230,6 +230,9 @@ export class Relay {
         ok: true,
         provider: 'dsh-api-pool',
         totalSpend: totals.spendUsd,
+        bankedSpend: totals.bankedUsd,
+        bankedDays: totals.bankedDays,
+        dayKey: totals.dayKey,
         spendSince: totals.since,
         endpoints: this.pool.status(),
       }))
