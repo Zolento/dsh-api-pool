@@ -34,9 +34,9 @@ dsh web --dump-config 2>/dev/null | grep -A 20 '^# == dsh-api-pool' || {
 if [ "${ACCEPTANCE_BOOT:-0}" != "1" ]; then
   echo
   echo "== 3/4 real boot skipped (set ACCEPTANCE_BOOT=1) =="
-  echo "   Booting re-asserts the shared provider profile in this profile's"
-  echo "   settings document, so it is opt-in while another dsh instance may"
-  echo "   be serving the same \$DSH_HOME."
+  echo "   Booting binds the shared relay port 127.0.0.1:8765 that the bundle's"
+  echo "   provider profile points at; it is opt-in so a probe run never competes"
+  echo "   with an already-running harness instance."
   echo
   echo "== 4/4 live completion skipped =="
   echo
