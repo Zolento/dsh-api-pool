@@ -4,6 +4,27 @@
 每次发版都打一个形如 `v<插件版本>-dsh<DSH版本>` 的 tag，例如
 `v0.1.0-dsh0.2.0-rc.2`；DSH 升级后若尚未重新验证，不要沿用旧 tag。
 
+## v0.1.3 — dsh0.2.0-rc.2（2026-10-04）
+
+**修复配额口径混用（会让健康端点被静默停用）**：本代理对 `USTC_1_API_KEY` 的
+`/key/info` 返回 `spend=$1281.80, max_budget=null`，而真正生效的预算在
+`/user/info`（`spend=$89.26 / $100 / 24h`）。`quotaFromHeaders()` 把 key 作用域的
+`x-litellm-key-spend` 写进了 user 作用域的预算里，比值 12.8 倍 → 该端点被判
+「配额耗尽」并从此不再被选中（`ok` 停在 25 就是证据）。
+
+- `quotaFromHeaders()` 只在绑定预算也是 key 作用域时才采纳 key 档的 spend/budget；
+  RPM 是 key 级，始终采纳。
+- `probeQuota()` 改为**优先 key 记录的预算**，key 没有 `max_budget` 时才用 user 记录
+  （偏离 Python 原版的「取使用率最高者」，原因见上；原策略在这种代理上会误判）。
+- 启动时**强制探测一次配额**并越过节流窗口，使历史遗留的错误口径在启动后立即纠正，
+  不必等 5 分钟。
+- 回归测试：key 档 spend 不得污染 user 档预算、健康端点保持可选、启动强制刷新。
+
+**新增 `/api-pool` 容量信息**：显示 `capacity: N/M ready now`；有端点冷却/配额禁用时
+显示 `next recovery: <端点> in <时间> (<原因>)`；全不可用时显示
+`blocked: no endpoint available — waiting for ...`；并单列永久禁用（401/403）端点。
+探测到配额耗尽但没有报错时，端点状态也会如实显示 `quota(NN%)`，不再假装 `ready`。
+
 ## v0.1.2 — dsh0.2.0-rc.2（2026-10-04）
 
 **修复进程崩溃（严重）**：中继转发上游响应体用的是

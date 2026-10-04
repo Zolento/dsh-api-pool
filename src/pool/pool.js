@@ -11,7 +11,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { classifyTransportError, summaryOf } from './kinds.js'
-import { emptyState, endpointState, onFailure, onSuccess, recordRequest, applyRecovery, recentRequests, timeUntilAvailable } from './state.js'
+import { emptyState, endpointState, onFailure, onSuccess, recordRequest, applyRecovery, recentRequests, timeUntilAvailable, availabilityOf } from './state.js'
 import { selectEndpoint } from './select.js'
 import { refreshQuotas } from './quota.js'
 
@@ -148,9 +148,11 @@ export class ApiPool {
     this.store?.save(this.state)
   }
 
-  /** Refresh quota facts, throttled by the shared deadline. */
-  async refreshQuotas() {
-    await refreshQuotas(this.specs, this.state, this.resolveKey, this.config, this.now())
+  /** Refresh quota facts, throttled by the shared deadline.
+   * @param {boolean} [force] probe now even inside the throttle window.
+   */
+  async refreshQuotas(force = false) {
+    await refreshQuotas(this.specs, this.state, this.resolveKey, this.config, this.now(), force)
   }
 
   /** Snapshot of endpoint health, for status surfaces. */
@@ -159,15 +161,26 @@ export class ApiPool {
     return this.specs.map((spec) => {
       const entry = applyRecovery(this.state, spec, now)
       const recent = recentRequests(entry, now, this.config.rpmWindowMs).length
+      const availability = availabilityOf(this.state, spec, now, this.config.quotaRecheckMs)
       let state = 'ready'
       if (spec.enabled === false) state = 'disabled'
       else if (entry.disabledUntil === -1) state = 'DISABLED'
       else if (entry.disabledUntil > now) state = `quota(${Math.ceil((entry.disabledUntil - now) / 1000)}s)`
       else if (entry.cooldownUntil > now) state = `cooldown(${Math.ceil((entry.cooldownUntil - now) / 1000)}s)`
+      // A probe can find the budget spent without any error having been seen;
+      // the state string must say so instead of claiming "ready" while the
+      // selector skips the endpoint.
+      else if (!availability.available && availability.reason === 'quota') {
+        const percent = entry.maxBudget > 0 ? ` ${Math.min(999, Math.round((entry.spend / entry.maxBudget) * 100))}%` : ''
+        state = `quota(${percent.trim()})`
+      }
       return {
         name: spec.name,
         baseURL: spec.baseURL,
         state,
+        available: availability.available,
+        reason: availability.reason,
+        availableInMs: availability.availableAt === Infinity ? Infinity : Math.max(0, availability.availableAt - now),
         recent,
         rpmLimit: entry.rpmLimit ?? spec.rpmLimit,
         spend: entry.spend,
@@ -179,6 +192,34 @@ export class ApiPool {
         successes: entry.successes,
       }
     })
+  }
+
+  /**
+   * Whole-pool capacity snapshot: how many endpoints are usable now, and when
+   * the next one recovers (`next`) — i.e. which endpoint a blocked request is
+   * waiting on and for how long.
+   */
+  availability() {
+    const now = this.now()
+    const rows = this.specs
+      .filter(spec => spec.enabled !== false)
+      .map((spec) => {
+        const entry = applyRecovery(this.state, spec, now)
+        return { spec, lastErrorKind: entry.lastErrorKind, ...availabilityOf(this.state, spec, now, this.config.quotaRecheckMs) }
+      })
+    const ready = rows.filter(row => row.available)
+    const pending = rows.filter(row => !row.available && row.availableAt !== Infinity)
+      .sort((left, right) => left.availableAt - right.availableAt)
+    const next = pending[0]
+    return {
+      enabled: rows.length,
+      ready: ready.length,
+      blocked: ready.length === 0,
+      next: next === undefined
+        ? undefined
+        : { name: next.spec.name, reason: next.reason, inMs: Math.max(0, next.availableAt - now), lastErrorKind: next.lastErrorKind },
+      permanentlyDisabled: rows.filter(row => !row.available && row.availableAt === Infinity).map(row => row.spec.name),
+    }
   }
 
   /**
@@ -232,7 +273,7 @@ export class ApiPool {
       }
 
       if (spec === undefined) {
-        const wait = timeUntilAvailable(this.state, this.specs, now)
+        const wait = timeUntilAvailable(this.state, this.specs, now, this.config.quotaRecheckMs)
         if (wait === undefined) {
           throw new AllEndpointsUnavailable('every pool endpoint is permanently disabled (auth/invalid key); fix the endpoint credentials and retry')
         }

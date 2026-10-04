@@ -109,19 +109,31 @@ export function recordRequest(state, entry, now) {
   state.roundRobinIndex += 1
 }
 
-/** Apply the quota facts a response carried in headers. */
+/**
+ * Apply the quota facts a response carried in headers.
+ *
+ * The `x-litellm-key-*` headers are **key-scope**. They must never be mixed with
+ * a binding budget that came from the user-level probe: this proxy reports a
+ * key's lifetime spend (e.g. `$1281.80`) while the enforced budget lives on the
+ * user record (`$100`), and combining them marked a perfectly healthy endpoint
+ * quota-exhausted. RPM is per key regardless of where the budget lives, so it is
+ * always adopted.
+ */
 export function quotaFromHeaders(entry, headers) {
+  const budgetIsKeyScope = entry.quotaSource !== 'user'
   const spend = headerValue(headers, 'x-litellm-key-spend')
   const maxBudget = headerValue(headers, 'x-litellm-key-max-budget')
   const rpmLimit = headerValue(headers, 'x-litellm-key-rpm-limit')
     ?? headerValue(headers, 'x-ratelimit-api_key-limit-requests')
   let hit = false
-  if (spend !== undefined && Number.isFinite(Number(spend))) {
+  if (budgetIsKeyScope && spend !== undefined && Number.isFinite(Number(spend))) {
     entry.spend = Number(spend)
+    entry.quotaSource ??= 'key'
     hit = true
   }
-  if (maxBudget !== undefined && Number.isFinite(Number(maxBudget))) {
+  if (budgetIsKeyScope && maxBudget !== undefined && Number.isFinite(Number(maxBudget))) {
     entry.maxBudget = Number(maxBudget)
+    entry.quotaSource = 'key'
     hit = true
   }
   if (rpmLimit !== undefined && Number.isFinite(Number(rpmLimit))) {
@@ -188,20 +200,46 @@ export function onFailure(state, spec, entry, info, now, config) {
 }
 
 /**
+ * When one endpoint becomes selectable again, and why it is not now.
+ *
+ * A quota-exhausted endpoint with no known `budgetResetAt` is held for one
+ * `quotaRecheckMs` after its last probe, so the pool cannot spin on an
+ * endpoint that no probe will ever free.
+ *
+ * @returns {{available: boolean, reason: 'ready'|'cooldown'|'quota'|'auth'|'disabled', availableAt: number}}
+ *   `availableAt` is `Infinity` for a permanently disabled endpoint.
+ */
+export function availabilityOf(state, spec, now, quotaRecheckMs = 1_800_000) {
+  const entry = applyRecovery(state, spec, now)
+  if (spec.enabled === false) return { available: false, reason: 'disabled', availableAt: Infinity }
+  if (entry.disabledUntil === -1) return { available: false, reason: 'auth', availableAt: Infinity }
+
+  let availableAt = Math.max(entry.cooldownUntil, entry.disabledUntil)
+  let reason = entry.disabledUntil > now ? 'quota' : 'cooldown'
+  if (availableAt <= now) {
+    reason = 'ready'
+    availableAt = now
+  }
+  if (quotaExhausted(entry)) {
+    const reset = entry.budgetResetAt ?? ((entry.quotaCheckedAt ?? now) + quotaRecheckMs)
+    if (reset > availableAt) availableAt = reset
+    reason = 'quota'
+  }
+  if (availableAt <= now) return { available: true, reason: 'ready', availableAt: now }
+  return { available: false, reason, availableAt }
+}
+
+/**
  * Milliseconds until the soonest endpoint may be selected again.
  * @returns {number|undefined} undefined when every enabled endpoint is permanently disabled.
  */
-export function timeUntilAvailable(state, specs, now) {
+export function timeUntilAvailable(state, specs, now, quotaRecheckMs) {
   let soonest
   for (const spec of specs) {
     if (spec.enabled === false) continue
-    const entry = applyRecovery(state, spec, now)
-    if (entry.disabledUntil === -1) continue
-    let candidate = Math.max(now, entry.cooldownUntil, entry.disabledUntil)
-    if (quotaExhausted(entry) && entry.budgetResetAt !== undefined) {
-      candidate = Math.max(candidate, entry.budgetResetAt)
-    }
-    if (soonest === undefined || candidate < soonest) soonest = candidate
+    const { availableAt } = availabilityOf(state, spec, now, quotaRecheckMs)
+    if (availableAt === Infinity) continue
+    if (soonest === undefined || availableAt < soonest) soonest = availableAt
   }
   if (soonest === undefined) return undefined
   return Math.max(0, soonest - now)

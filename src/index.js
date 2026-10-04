@@ -70,6 +70,17 @@ function tokenFingerprint(token) {
   return createHash('sha256').update(token).digest('hex').slice(0, 8)
 }
 
+/** Human-readable duration for status output (`45s`, `3m20s`, `1h5m`). */
+function formatDuration(ms) {
+  if (!Number.isFinite(ms)) return 'never'
+  const seconds = Math.max(0, Math.round(ms / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m${seconds % 60}s`
+  const hours = Math.floor(minutes / 60)
+  return `${hours}h${minutes % 60}m`
+}
+
 /**
  * Whether another dsh-api-pool process already serves the fixed relay port.
  * Two instances of the harness (web plus headless) share one provider profile,
@@ -117,6 +128,7 @@ export function apply(ctx, config) {
     config: undefined,
     exposedId: undefined,
     syncing: false,
+    quotaPrimed: false,
     keyCache: new Map(),
   }
 
@@ -208,6 +220,16 @@ export function apply(ctx, config) {
       resolveKey,
     })
 
+    // Probe once at startup, past the throttle: persisted quota may have been
+    // written by an older build (or by another process) and must not keep a
+    // healthy endpoint disabled until the next scheduled refresh.
+    if (!runtime.quotaPrimed) {
+      runtime.quotaPrimed = true
+      void runtime.pool.refreshQuotas(true).catch((error) => {
+        ctx.logger.warn(`api-pool: startup quota probe failed: ${String(error)}`)
+      })
+    }
+
     if (runtime.relay === undefined) {
       if (await relayAlreadyServing(token)) {
         // Another harness process owns the relay; this one shares its state
@@ -298,13 +320,27 @@ export function apply(ctx, config) {
         const lines = [`dsh-api-pool — ${pool.specs.length} endpoint(s), strategy=${pool.config.strategy}`]
         for (const row of pool.status()) {
           const quota = row.spend !== undefined && row.maxBudget !== undefined
-            ? ` spend=$${row.spend}/$${row.maxBudget}`
+            ? ` spend=$${row.spend.toFixed(2)}/$${row.maxBudget}`
             : ''
           const rpm = row.rpmLimit === undefined ? `${row.recent}` : `${row.recent}/${row.rpmLimit}`
           lines.push(`  ${row.name}  ${row.state}  rpm=${rpm}${quota}${row.lastErrorKind === undefined ? '' : `  last=${row.lastErrorKind}`}`)
         }
-        if (runtime.ownsRelay) lines.push(`  relay: http://127.0.0.1:${RELAY_PORT}${BASE_PATH} (owned by this process)`)
-        else lines.push(`  relay: http://127.0.0.1:${RELAY_PORT}${BASE_PATH} (shared)`)
+        const capacity = pool.availability()
+        lines.push(`  capacity: ${capacity.ready}/${capacity.enabled} ready now`)
+        if (capacity.blocked) {
+          lines.push(capacity.next === undefined
+            ? '  blocked: every endpoint is permanently disabled (fix the credential or re-enable the endpoint)'
+            : `  blocked: no endpoint available — waiting for ${capacity.next.name} to recover in ${formatDuration(capacity.next.inMs)}`
+              + ` (${capacity.next.reason}${capacity.next.lastErrorKind === undefined ? '' : `, last=${capacity.next.lastErrorKind}`})`)
+        } else if (capacity.next !== undefined) {
+          lines.push(`  next recovery: ${capacity.next.name} in ${formatDuration(capacity.next.inMs)} (${capacity.next.reason})`)
+        }
+        if (capacity.permanentlyDisabled.length > 0) {
+          lines.push(`  permanently disabled: ${capacity.permanentlyDisabled.join(', ')}`)
+        }
+        lines.push(runtime.ownsRelay
+          ? `  relay: http://127.0.0.1:${RELAY_PORT}${BASE_PATH} (owned by this process)`
+          : `  relay: http://127.0.0.1:${RELAY_PORT}${BASE_PATH} (shared)`)
         return { kind: 'success', text: lines.join('\n') }
       },
     }), 'api-pool: status command')

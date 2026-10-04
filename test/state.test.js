@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { emptyState, endpointState, onFailure, onSuccess, recordRequest, isUnavailable, timeUntilAvailable } from '../src/pool/state.js'
+import { emptyState, endpointState, onFailure, onSuccess, recordRequest, isUnavailable, timeUntilAvailable, availabilityOf, quotaFromHeaders, quotaExhausted } from '../src/pool/state.js'
 import { selectEndpoint } from '../src/pool/select.js'
 import { ErrorKind } from '../src/pool/kinds.js'
 
@@ -105,4 +105,79 @@ test('a successful call clears cooldowns', () => {
   assert.equal(entry.cooldownUntil, 0)
   assert.equal(entry.consecutiveFailures, 0)
   assert.equal(entry.successes, 1)
+})
+
+test('availabilityOf explains why and when an endpoint returns', () => {
+  const ready = spec('ready')
+  assert.deepEqual(availabilityOf(emptyState(), ready, 1000, 60_000), { available: true, reason: 'ready', availableAt: 1000 })
+
+  const state = emptyState()
+  const cooling = spec('cooling')
+  onFailure(state, cooling, endpointState(state, 'cooling'), { kind: ErrorKind.RATE_LIMIT, message: 'rl' }, 1000, BASE)
+  const during = availabilityOf(state, cooling, 1000, 60_000)
+  assert.equal(during.available, false)
+  assert.equal(during.reason, 'cooldown')
+  assert.ok(during.availableAt > 1000)
+  assert.equal(availabilityOf(state, cooling, during.availableAt + 1, 60_000).available, true)
+
+  const dead = spec('dead')
+  onFailure(state, dead, endpointState(state, 'dead'), { kind: ErrorKind.AUTH, message: 'bad key' }, 1000, BASE)
+  assert.deepEqual(availabilityOf(state, dead, 1000, 60_000), { available: false, reason: 'auth', availableAt: Infinity })
+
+  assert.equal(availabilityOf(emptyState(), spec('off', { enabled: false }), 1000, 60_000).reason, 'disabled')
+})
+
+test('a quota-exhausted endpoint with no known reset is held for one recheck window', () => {
+  const target = spec('quota')
+  const state = emptyState()
+  const entry = endpointState(state, 'quota')
+  entry.spend = 100
+  entry.maxBudget = 100
+  entry.quotaCheckedAt = 1000
+
+  const during = availabilityOf(state, target, 1000, 60_000)
+  assert.equal(during.available, false)
+  assert.equal(during.reason, 'quota')
+  assert.equal(during.availableAt, 61_000)
+  assert.equal(availabilityOf(state, target, 61_001, 60_000).available, true)
+})
+
+test('key-scope quota headers never mix with a user-scope budget', () => {
+  const entry = endpointState(emptyState(), 'ustc-1')
+  // The binding budget came from the user record...
+  entry.quotaSource = 'user'
+  entry.maxBudget = 100
+  entry.spend = 89.26
+  // ...while the response header reports the key's lifetime spend.
+  quotaFromHeaders(entry, { 'x-litellm-key-spend': '1281.79', 'x-litellm-key-rpm-limit': '20' })
+
+  assert.equal(entry.spend, 89.26, 'a key-scope spend must not be paired with a user-scope budget')
+  assert.equal(entry.maxBudget, 100)
+  assert.equal(entry.rpmLimit, 20, 'RPM is per key, so it is always adopted')
+  assert.equal(quotaExhausted(entry), false, 'the healthy endpoint must stay selectable')
+})
+
+test('key-scope headers bind both spend and budget when the budget is key-scope', () => {
+  const entry = endpointState(emptyState(), 'ustc')
+  quotaFromHeaders(entry, { 'x-litellm-key-spend': '95', 'x-litellm-key-max-budget': '100' })
+  assert.equal(entry.quotaSource, 'key')
+  assert.equal(entry.spend, 95)
+  assert.equal(entry.maxBudget, 100)
+  assert.equal(quotaExhausted(entry), false)
+
+  quotaFromHeaders(entry, { 'x-litellm-key-spend': '100' })
+  assert.equal(quotaExhausted(entry), true)
+})
+
+test('a probe-found 100% budget makes the endpoint unavailable without any error', () => {
+  const target = spec('quota')
+  const state = emptyState()
+  const entry = endpointState(state, 'quota')
+  entry.maxBudget = 100
+  entry.spend = 100
+  entry.quotaSource = 'key'
+
+  assert.equal(quotaExhausted(entry), true)
+  assert.equal(isUnavailable(state, target, 1000), true)
+  assert.equal(availabilityOf(state, target, 1000, 60_000).reason, 'quota')
 })
