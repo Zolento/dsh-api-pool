@@ -15,7 +15,10 @@
     "client",
     "cordis.patch.yml",
     "README.md",
-    "RESEARCH.md"
+    "RESEARCH.md",
+    "RESULTS.md",
+    "CHANGELOG.md",
+    "dsh-compat.json"
   ],
   "engines": {
     "node": ">=22"
@@ -30,7 +33,8 @@
   },
   "scripts": {
     "test": "node --test test/*.test.js",
-    "acceptance": "bash scripts/acceptance.sh"
+    "acceptance": "bash scripts/acceptance.sh",
+    "check-dsh": "node scripts/check-dsh.mjs"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "3.18.4"
