@@ -24,7 +24,6 @@ window.__ModuleLoader__.load({
         title: 'API 池',
         intro: '把多个 OpenAI 兼容端点（多个 key）作为一个容量池使用；失败会按错误类型冷却并自动切换到下一个端点。',
         enabled: '启用 API 池',
-        expose: '在 provider 列表中显示“API Pool”',
         strategy: '选择策略',
         strategyLeastLoaded: 'least_loaded（按 RPM 负载）',
         strategyPriority: 'priority（按优先级）',
@@ -54,7 +53,6 @@ window.__ModuleLoader__.load({
         title: 'API Pool',
         intro: 'Use several OpenAI-compatible endpoints (several keys) as one capacity pool; failures are classified, cooled down, and retried on the next endpoint.',
         enabled: 'Enable API pool',
-        expose: 'Show “API Pool” in the provider list',
         strategy: 'Strategy',
         strategyLeastLoaded: 'least_loaded (by RPM load)',
         strategyPriority: 'priority',
@@ -208,10 +206,6 @@ window.__ModuleLoader__.load({
         h('label', { style: { ...field, flexDirection: 'row', gap: 6, alignItems: 'center' } },
           h('input', { type: 'checkbox', checked: value.enabled !== false, disabled: readOnly, onChange: event => mutate([{ op: 'set', path: ['enabled'], value: event.target.checked }]) }),
           h('span', null, t('enabled')),
-        ),
-        h('label', { style: { ...field, flexDirection: 'row', gap: 6, alignItems: 'center' } },
-          h('input', { type: 'checkbox', checked: value.exposeProvider !== false, disabled: readOnly, onChange: event => mutate([{ op: 'set', path: ['exposeProvider'], value: event.target.checked }]) }),
-          h('span', null, t('expose')),
         ),
       )
 

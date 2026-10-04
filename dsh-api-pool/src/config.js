@@ -5,6 +5,10 @@
  * editable live only when it is declared `volatile`, so every user-managed
  * field is volatile and the whole `endpoints` array is volatile as one unit
  * (that is what allows indexed path edits such as removing an endpoint).
+ *
+ * The provider's identity (route id, display name, model catalog, relay URL) is
+ * declared in the bundle patch, not here, so it cannot drift into a stale
+ * written document; this schema owns only the endpoints and the pool policy.
  */
 
 import z from '@deepseek-ai/schemastery'
@@ -25,17 +29,7 @@ const endpointSchema = z.object({
 /** Plugin configuration. */
 export const Config = z.object({
   enabled: z.boolean().default(true).volatile(),
-  exposeProvider: z.boolean().default(true).volatile(),
-  providerId: z.string().default('deepseek-pool').volatile(),
-  displayName: z.string().default('API Pool').volatile(),
   strategy: z.union(['least_loaded', 'priority', 'round_robin']).default('least_loaded').volatile(),
-  models: z.array(z.string()).default(['deepseek-flash']).volatile(),
-  api: z.string().default('openai-completions').volatile(),
-  reasoning: z.union(['off', 'low', 'high', 'max']).default('high').volatile(),
-  thinkingFormat: z.string().default('deepseek').volatile(),
-  contextWindow: z.number().step(1).min(1).default(1_000_000).volatile(),
-  maxTokens: z.number().step(1).min(1).default(65_536).volatile(),
-  basePath: z.string().default('/v1').volatile(),
   endpoints: z.array(endpointSchema).default([]).volatile(),
 
   // Pool tuning (milliseconds).
@@ -105,7 +99,7 @@ export function normalizeEndpoints(raw) {
 /**
  * Resolve the plugin config into the pool configuration the orchestrator reads.
  * @param {object} plain plain config values.
- * @param {object} extras runtime hooks (event sink, fetch, key resolver, clock).
+ * @param {object} extras runtime hooks (event sink, fetch, models, key resolver, clock).
  */
 export function resolvePoolConfig(plain, extras = {}) {
   const cooldowns = {}
@@ -130,15 +124,6 @@ export function resolvePoolConfig(plain, extras = {}) {
     logSuccesses: plain.logSuccesses === true,
     cooldowns,
     endpoints: normalizeEndpoints(plain.endpoints),
-    models: normalizeModels(plain.models),
     ...extras,
   }
-}
-
-/** The models advertised for the routed provider, deduplicated and non-empty. */
-export function normalizeModels(raw) {
-  const models = (Array.isArray(raw) ? raw : [])
-    .map(value => (typeof value === 'string' ? value.trim() : ''))
-    .filter(value => value !== '')
-  return [...new Set(models)].length === 0 ? ['deepseek-flash'] : [...new Set(models)]
 }

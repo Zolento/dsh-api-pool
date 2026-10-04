@@ -1,11 +1,15 @@
 /**
  * dsh-api-pool — a multi-endpoint, quota-aware API pool for DeepSeek Harness.
  *
- * The plugin registers a loopback OpenAI-compatible relay and publishes it as
- * the provider route `deepseek-pool` through the `llm-pi-ai` settings
- * namespace, so the provider and its models (default `deepseek-flash`) appear
- * in the harness's provider/model pickers and in Settings. Endpoints are
- * managed from the "API Pool" settings page the browser half contributes.
+ * The bundle declares the provider route `deepseek-pool` ("API Pool") in the
+ * `llm-pi-ai` namespace ([cordis.patch.yml](../cordis.patch.yml)), and this host
+ * half runs the loopback relay that profile points at. Requests from the
+ * harness reach the relay in OpenAI-compatible form, and the relay applies the
+ * pool: pick an endpoint, forward, classify a failure, cool the endpoint down,
+ * and retry the same request on the next one when nothing was streamed yet.
+ *
+ * Endpoints and pool tuning live in this plugin's own settings section, which
+ * the browser half renders as the "API Pool" page.
  *
  * @module dsh-api-pool
  */
@@ -14,21 +18,27 @@ import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { Config, plainConfig, resolvePoolConfig, normalizeModels } from './config.js'
+import { Config, plainConfig, resolvePoolConfig } from './config.js'
 import { ApiPool, StateStore } from './pool/pool.js'
 import { EventLog } from './pool/events.js'
 import { Relay } from './relay.js'
-import { buildProviderProfile, ensureProviderProfile, removeProviderProfile, PROVIDER_ID_PATTERN } from './provider.js'
 
 export { Config } from './config.js'
 
 export const name = 'dsh-api-pool'
 export const inject = ['settings']
 
+/** The provider route the bundle declares. Mirrored by `PROVIDER_MODELS`. */
+export const PROVIDER_ID = 'deepseek-pool'
+/** Models the bundle's provider profile advertises. */
+export const PROVIDER_MODELS = Object.freeze(['deepseek-flash'])
+/** Loopback port the bundle's provider profile points at (override only for tests/ops). */
+export const RELAY_PORT = Number(process.env.DSH_API_POOL_PORT ?? 8765)
+/** Path prefix the bundle's provider profile uses. */
+export const BASE_PATH = '/v1'
 /** Credential reference the relay token is stored under. */
 export const RELAY_TOKEN_REF = 'DSH_API_POOL_LOCAL_KEY'
-
-/** The `llm-pi-ai` settings namespace, where provider profiles live. */
+/** The `llm-pi-ai` settings namespace, where the provider profile lives. */
 export const PROVIDER_SETTINGS_NS = 'llm-pi-ai'
 
 /** Plugin-owned runtime directory under the harness home. */
@@ -62,6 +72,29 @@ function tokenFingerprint(token) {
 }
 
 /**
+ * Whether another dsh-api-pool process already serves the fixed relay port.
+ * Two instances of the harness (web plus headless) share one provider profile,
+ * so the first one to start owns the relay and the others reuse it.
+ * @returns {Promise<boolean>} true when an existing relay answers for us.
+ */
+async function relayAlreadyServing(token) {
+  try {
+    const response = await fetch(`http://127.0.0.1:${RELAY_PORT}/healthz`, { signal: AbortSignal.timeout(1000) })
+    if (!response.ok) return false
+    const body = await response.json()
+    if (body?.provider !== 'dsh-api-pool') return false
+    // Prove it is ours by presenting the shared token against the model list.
+    const authed = await fetch(`http://127.0.0.1:${RELAY_PORT}${BASE_PATH}/models`, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(1000),
+    })
+    return authed.ok
+  } catch {
+    return false
+  }
+}
+
+/**
  * Install the API pool.
  * @param {object} ctx harness plugin context.
  * @param {object} config validated plugin config.
@@ -81,9 +114,8 @@ export function apply(ctx, config) {
   const runtime = {
     pool: undefined,
     relay: undefined,
+    ownsRelay: false,
     config: undefined,
-    exposedId: undefined,
-    wantExposure: false,
     keyCache: new Map(),
   }
 
@@ -110,52 +142,13 @@ export function apply(ctx, config) {
     throw new Error(`no credential for endpoint "${spec.name}": export ${ref} or store it in Settings → Models`)
   }
 
-  /** Advertise (or withdraw) the pool route through llm-pi-ai. */
-  async function syncExposure() {
-    const settings = ctx.get('settings')
-    if (settings === undefined) return
-    const providerId = runtime.config.providerId
-    const wanted = runtime.wantExposure && PROVIDER_ID_PATTERN.test(providerId)
-    if (!wanted) {
-      if (runtime.exposedId !== undefined) await removeProviderProfile(settings, { providerId: runtime.exposedId })
-      runtime.exposedId = undefined
-      return
-    }
-    if (runtime.exposedId !== undefined && runtime.exposedId !== providerId) {
-      await removeProviderProfile(settings, { providerId: runtime.exposedId })
-      runtime.exposedId = undefined
-    }
-    const profile = buildProviderProfile({
-      baseURL: `${runtime.relay.url}${runtime.config.basePath}`,
-      models: runtime.config.models,
-      api: runtime.config.api,
-      apiKeyEnv: RELAY_TOKEN_REF,
-      displayName: runtime.config.displayName,
-      reasoning: runtime.config.reasoning,
-      thinkingFormat: runtime.config.thinkingFormat,
-      contextWindow: runtime.config.contextWindow,
-      maxTokens: runtime.config.maxTokens,
-    })
-    await ensureProviderProfile(settings, { ns: PROVIDER_SETTINGS_NS, providerId, profile })
-    runtime.exposedId = providerId
-  }
-
-  /** Rebuild the pool from current config, starting the relay on first use. */
+  /** Rebuild the pool from current config; start (or reuse) the relay once. */
   async function rebuild() {
     const plain = plainConfig(config)
-    const models = normalizeModels(plain.models)
     runtime.config = resolvePoolConfig(plain, {
       events,
       fetchImpl: fetch,
-      models,
-      basePath: plain.basePath ?? '/v1',
-      providerId: plain.providerId ?? 'deepseek-pool',
-      displayName: plain.displayName ?? 'API Pool',
-      api: plain.api ?? 'openai-completions',
-      reasoning: plain.reasoning ?? 'high',
-      thinkingFormat: plain.thinkingFormat ?? 'deepseek',
-      contextWindow: plain.contextWindow ?? 1_000_000,
-      maxTokens: plain.maxTokens ?? 65_536,
+      models: [...PROVIDER_MODELS],
     })
     events.logSuccesses = plain.logSuccesses === true
 
@@ -168,40 +161,34 @@ export function apply(ctx, config) {
     })
 
     if (runtime.relay === undefined) {
-      runtime.relay = new Relay({
-        pool: runtime.pool,
-        token,
-        basePath: runtime.config.basePath,
-        models,
-        logger: ctx.logger,
-      })
-      await runtime.relay.listen(0)
-      ctx.logger.info(`api-pool: relay listening on ${runtime.relay.url}${runtime.config.basePath} (token ${tokenFingerprint(token)})`)
+      if (await relayAlreadyServing(token)) {
+        // Another harness process owns the relay; this one shares its state
+        // through the same settings document and does not fight for the port.
+        runtime.relay = new Relay({ pool: runtime.pool, token, basePath: BASE_PATH, models: [...PROVIDER_MODELS], logger: ctx.logger })
+        ctx.logger.info(`api-pool: reusing the relay already listening on http://127.0.0.1:${RELAY_PORT}${BASE_PATH}`)
+      } else {
+        const relay = new Relay({ pool: runtime.pool, token, basePath: BASE_PATH, models: [...PROVIDER_MODELS], logger: ctx.logger })
+        try {
+          await relay.listen(RELAY_PORT)
+          runtime.relay = relay
+          runtime.ownsRelay = true
+          ctx.logger.info(`api-pool: relay listening on ${relay.url}${BASE_PATH} (token ${tokenFingerprint(token)})`)
+        } catch (error) {
+          ctx.logger.error(`api-pool: could not bind 127.0.0.1:${RELAY_PORT}; the declared provider profile points there. ${String(error)}`)
+        }
+      }
     } else {
       runtime.relay.pool = runtime.pool
-      runtime.relay.basePath = runtime.config.basePath
-      runtime.relay.models = models
     }
 
-    runtime.wantExposure = runtime.config.enabled && plain.exposeProvider !== false
-    try {
-      await syncExposure()
-    } catch (error) {
-      runtime.wantExposure = false
-      runtime.exposedId = undefined
-      ctx.logger.error(
-        `api-pool: could not expose provider "${runtime.config.providerId}"; is the "${PROVIDER_SETTINGS_NS}" plugin installed and is its providers section writable?`,
-      )
-      ctx.logger.error(error)
-    }
     if (runtime.config.endpoints.length === 0) {
       ctx.logger.warn('api-pool: no endpoints configured yet; open Settings → API Pool to add one')
     } else {
-      ctx.logger.info(`api-pool: ${runtime.config.endpoints.length} endpoint(s), strategy=${runtime.config.strategy}, provider=${runtime.config.providerId}`)
+      ctx.logger.info(`api-pool: ${runtime.config.endpoints.length} endpoint(s), strategy=${runtime.config.strategy}, provider=${PROVIDER_ID}`)
     }
   }
 
-  /** Store the relay token so `llm-pi-ai` can present it. */
+  /** Store the relay token so the declared provider profile can present it. */
   async function syncToken() {
     const credentials = ctx.get('credentials')
     if (credentials === undefined) {
@@ -248,18 +235,15 @@ export function apply(ctx, config) {
           const rpm = row.rpmLimit === undefined ? `${row.recent}` : `${row.recent}/${row.rpmLimit}`
           lines.push(`  ${row.name}  ${row.state}  rpm=${rpm}${quota}${row.lastErrorKind === undefined ? '' : `  last=${row.lastErrorKind}`}`)
         }
-        if (runtime.relay !== undefined) lines.push(`  relay: ${runtime.relay.url}${pool.config.basePath}`)
+        if (runtime.ownsRelay) lines.push(`  relay: http://127.0.0.1:${RELAY_PORT}${BASE_PATH} (owned by this process)`)
+        else lines.push(`  relay: http://127.0.0.1:${RELAY_PORT}${BASE_PATH} (shared)`)
         return { kind: 'success', text: lines.join('\n') }
       },
     }), 'api-pool: status command')
   })
 
   ctx.effect(() => async () => {
-    const settings = ctx.get('settings')
-    if (settings !== undefined && runtime.exposedId !== undefined) {
-      await removeProviderProfile(settings, { ns: PROVIDER_SETTINGS_NS, providerId: runtime.exposedId })
-    }
-    await runtime.relay?.close()
+    if (runtime.ownsRelay) await runtime.relay?.close()
     store.save(runtime.pool?.state)
-  }, 'api-pool: withdraw route and stop relay')
+  }, 'api-pool: stop the relay this process owns')
 }

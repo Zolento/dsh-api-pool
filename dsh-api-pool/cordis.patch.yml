@@ -1,5 +1,37 @@
-# dsh-api-pool bundle patch — inserts the host plugin into the composing profile.
-# The browser half is discovered from package.json's `dsh.client`, not from here.
+# dsh-api-pool bundle patch.
+#
+# 1. Insert the host plugin; the browser half is discovered from package.json's
+#    `dsh.client`.
+# 2. Declare the pool's provider route in the `llm-pi-ai` namespace so it exists
+#    as soon as the bundle composes — with no runtime write to the user's
+#    settings document (which would go stale whenever a short-lived `dsh`
+#    process mounts the profile, and would fight a second running instance).
+#    The relay URL is the plugin's fixed default port; keep them in sync.
 - insert:
     - id: dsh-api-pool
       name: dsh-api-pool
+- id: llm-pi-ai
+  name: "@deepseek-ai/dsh-llm-pi-ai"
+  config:
+    providers:
+      deepseek-pool:
+        displayName: API Pool
+        reasoning: high
+        api: openai-completions
+        apiKeyEnv: DSH_API_POOL_LOCAL_KEY
+        baseURL: http://127.0.0.1:8765/v1
+        models:
+          - id: deepseek-flash
+            name: deepseek-flash
+            input:
+              - text
+              - image
+            contextWindow: 1000000
+            maxTokens: 65536
+            reasoningEfforts:
+              off: off
+              low: low
+              high: high
+              max: max
+            compat:
+              thinkingFormat: deepseek
