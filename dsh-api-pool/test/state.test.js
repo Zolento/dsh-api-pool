@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { emptyState, endpointState, onFailure, onSuccess, recordRequest, isUnavailable, timeUntilAvailable, availabilityOf, quotaFromHeaders, quotaExhausted } from '../src/pool/state.js'
+import { emptyState, endpointState, onFailure, onSuccess, recordRequest, isUnavailable, timeUntilAvailable, availabilityOf, quotaFromHeaders, quotaExhausted, responseCost, totalSpendOf } from '../src/pool/state.js'
 import { selectEndpoint } from '../src/pool/select.js'
 import { ErrorKind } from '../src/pool/kinds.js'
 
@@ -180,4 +180,37 @@ test('a probe-found 100% budget makes the endpoint unavailable without any error
   assert.equal(quotaExhausted(entry), true)
   assert.equal(isUnavailable(state, target, 1000), true)
   assert.equal(availabilityOf(state, target, 1000, 60_000).reason, 'quota')
+})
+
+test('responseCost reads the provider cost and counts anything missing as 0', () => {
+  assert.equal(responseCost({ 'x-litellm-response-cost': '1.1999999999999999e-05' }), 1.1999999999999999e-05)
+  assert.equal(responseCost({ 'x-litellm-response-cost-original': '0.5' }), 0.5)
+  assert.equal(responseCost({}), 0, 'a deployment that reports no cost must not break anything')
+  assert.equal(responseCost(undefined), 0)
+  assert.equal(responseCost({ 'x-litellm-response-cost': 'not-a-number' }), 0)
+  assert.equal(responseCost({ 'x-litellm-response-cost': '-3' }), 0)
+  assert.equal(responseCost(new Headers({ 'x-litellm-response-cost': '0.25' })), 0.25, 'a Headers instance works too')
+})
+
+test('successful calls accumulate per-endpoint and pool-wide spend', () => {
+  const state = emptyState()
+  const a = spec('a')
+  const b = spec('b')
+  assert.equal(state.totalSpend, 0)
+  assert.equal(endpointState(state, 'a').totalSpend, 0)
+
+  onSuccess(state, a, 1000, 10, { 'x-litellm-response-cost': '0.25' })
+  onSuccess(state, b, 1000, 10, { 'x-litellm-response-cost': '0.5' })
+  onSuccess(state, a, 2000, 10, {})                            // no cost header → adds 0
+  onSuccess(state, a, 3000, 10, { 'x-litellm-response-cost': 'garbage' })
+
+  assert.equal(endpointState(state, 'a').totalSpend, 0.25)
+  assert.equal(endpointState(state, 'b').totalSpend, 0.5)
+  assert.equal(totalSpendOf(state), 0.75)
+  assert.equal(state.spendSince, 1000)
+
+  // The pool total is authoritative even before any endpoint entry exists.
+  assert.equal(totalSpendOf(emptyState()), 0)
+  assert.equal(totalSpendOf(undefined), 0)
+  assert.equal(totalSpendOf({ totalSpend: 'nope' }), 0)
 })

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { ApiPool, AllEndpointsUnavailable } from '../src/pool/pool.js'
 import { ErrorKind } from '../src/pool/kinds.js'
 import { onFailure, endpointState } from '../src/pool/state.js'
+import { onSuccess } from '../src/pool/state.js'
 
 function poolConfig(endpoints, extra = {}) {
   return {
@@ -168,4 +169,19 @@ test('availability lists permanently disabled endpoints', () => {
   assert.equal(row.available, false)
   assert.equal(row.reason, 'auth')
   assert.equal(row.availableInMs, Infinity)
+})
+
+test('status and totals report cumulative spend with safe fallbacks', () => {
+  const pool = new ApiPool({ config: poolConfig(['a', 'b']), resolveKey: async () => 'key', now: () => 1000 })
+  const before = pool.status()
+  assert.deepEqual(before.map(row => row.totalSpend), [0, 0], 'unknown spend reports 0, never undefined')
+  assert.deepEqual(pool.totals(), { spendUsd: 0, since: undefined })
+
+  onSuccess(pool.state, pool.specs[0], 1000, 5, { 'x-litellm-response-cost': '0.125' })
+  onSuccess(pool.state, pool.specs[1], 2000, 5, { 'x-litellm-response-cost': '0.375' })
+
+  const rows = pool.status()
+  assert.equal(rows[0].totalSpend, 0.125)
+  assert.equal(rows[1].totalSpend, 0.375)
+  assert.deepEqual(pool.totals(), { spendUsd: 0.5, since: 1000 })
 })

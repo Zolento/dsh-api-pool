@@ -118,20 +118,31 @@ DSH 只把 **Host 设置**开放给从 `127.0.0.1` / `localhost` 打开的页面
 
 ```
 dsh-api-pool — 4 endpoint(s), strategy=least_loaded
-  ustc    ready          rpm=0/20  spend=$40.79/$100  last=rate_limit
-  ustc-1  quota( 89%)    rpm=0/20  spend=$89.26/$100
-  ustc-2  ready          rpm=0/20  spend=$32.16/$100
-  ustc-3  ready          rpm=0/20  spend=$0.00/$100
+  ustc    ready          rpm=0/20  window=$40.79/$100  cum=$12.345678  last=rate_limit
+  ustc-1  quota( 89%)    rpm=0/20  window=$89.26/$100  cum=$3.210000
+  ustc-2  ready          rpm=0/20  window=$32.16/$100  cum=$0.987654
+  ustc-3  ready          rpm=0/20  window=$0.00/$100   cum=$0.000000
   capacity: 3/4 ready now
+  cumulative spend: $17.531332 since 2026-10-04T13:00:00.000Z
   next recovery: ustc-1 in 4h30m (quota)
   relay: http://127.0.0.1:8765/v1 (owned by this process)
 ```
 
+- `window=` 是**当前预算窗口**的消费/上限（来自 `/key/info` 或 `/user/info`，
+  会随 `budget_reset_at` 清零）；`cum=` 是本插件自己累加的**累计消费**，永不清零；
+- 累计值来自每个成功响应的 `x-litellm-response-cost` 头，逐端点累加并从池级总计；
+  **拿不到该头就计 0**（不会报错、不会出现 NaN）；累计值随 `state.json` 持久化，
+  端点被删除后池级总计仍然保留；
 - 每个端点后缀 `last=` 是最近一次失败分类；`quota(NN%)` 表示探测到预算已用比例；
 - `capacity` 是当前可直接使用的端点数；只要有端点处于冷却/配额禁用，就给出
   `next recovery`（**卡在哪个端点、还有多久**）——这正是「全端点不可用」时请求在等的东西；
 - 全不可用时改成 `blocked: no endpoint available — waiting for <名字> to recover in <时间> (<原因>, last=<错误>)`；
 - 永久禁用（401/403）的端点单独列出 `permanently disabled: ...` 并提示修凭据。
+- `GET /healthz` 也带 `totalSpend` / `spendSince`，便于外部脚本读取。
+
+> 关于 `x-litellm-key-spend`：它是**当前预算窗口**的 key 消费（有 `max_budget` 时会在
+> 窗口重置清零）；如果这个 key 根本没有预算（例如 `USTC_1_API_KEY`），它就变成一条
+> 只增不减的累计值——所以不能拿它当「累计消费」，本插件的 `cum=` 才是。
 
 ## 配置参考
 

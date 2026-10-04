@@ -82,6 +82,15 @@ function formatDuration(ms) {
 }
 
 /**
+ * Format a USD amount for status output. Anything missing or non-finite counts
+ * as 0, so a deployment that reports no cost still renders cleanly.
+ */
+function usd(value) {
+  const amount = Number.isFinite(value) && value > 0 ? value : 0
+  return amount >= 0.01 ? amount.toFixed(4) : amount.toFixed(6)
+}
+
+/**
  * Whether another dsh-api-pool process already serves the fixed relay port.
  * Two instances of the harness (web plus headless) share one provider profile,
  * so the first one to start owns the relay and the others reuse it.
@@ -319,14 +328,17 @@ export function apply(ctx, config) {
         if (pool === undefined) return { kind: 'success', text: 'api-pool: still starting' }
         const lines = [`dsh-api-pool — ${pool.specs.length} endpoint(s), strategy=${pool.config.strategy}`]
         for (const row of pool.status()) {
-          const quota = row.spend !== undefined && row.maxBudget !== undefined
-            ? ` spend=$${row.spend.toFixed(2)}/$${row.maxBudget}`
+          const window = Number.isFinite(row.spend) && Number.isFinite(row.maxBudget) && row.maxBudget > 0
+            ? ` window=$${row.spend.toFixed(2)}/$${row.maxBudget}`
             : ''
           const rpm = row.rpmLimit === undefined ? `${row.recent}` : `${row.recent}/${row.rpmLimit}`
-          lines.push(`  ${row.name}  ${row.state}  rpm=${rpm}${quota}${row.lastErrorKind === undefined ? '' : `  last=${row.lastErrorKind}`}`)
+          const cumulative = ` cum=$${usd(row.totalSpend)}`
+          lines.push(`  ${row.name}  ${row.state}  rpm=${rpm}${window}${cumulative}${row.lastErrorKind === undefined ? '' : `  last=${row.lastErrorKind}`}`)
         }
         const capacity = pool.availability()
         lines.push(`  capacity: ${capacity.ready}/${capacity.enabled} ready now`)
+        const totals = pool.totals()
+        lines.push(`  cumulative spend: $${usd(totals.spendUsd)}${totals.since === undefined ? '' : ` since ${new Date(totals.since).toISOString()}`}`)
         if (capacity.blocked) {
           lines.push(capacity.next === undefined
             ? '  blocked: every endpoint is permanently disabled (fix the credential or re-enable the endpoint)'
