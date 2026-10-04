@@ -84,20 +84,29 @@ test('the host plugin runs a relay that serves the configured endpoints', async 
   assert.equal(health.provider, 'dsh-api-pool')
   assert.deepEqual(health.endpoints.map(endpoint => endpoint.name).sort(), ['primary', 'secondary'])
 
-  // The token is stored so the declared provider profile can present it.
+  // The token is stored so the published provider profile can present it.
   assert.equal(credentials.has(RELAY_TOKEN_REF), true)
-  // The provider profile is declarative: the plugin writes no settings at all.
-  assert.deepEqual(mutations, [])
-  // The advertised model list comes from the bundle's profile.
+
+  // The plugin publishes the route through the `llm-pi-ai` settings namespace.
+  assert.equal(await waitFor(() => mutations.some(entry =>
+    entry.ns === 'llm-pi-ai'
+    && entry.ops[0]?.op === 'set'
+    && entry.ops[0]?.path.join('.') === 'providers.deepseek-pool')), true, 'the provider profile was not published')
+  const published = mutations.find(entry => entry.ops[0]?.op === 'set' && entry.ops[0]?.path.join('.') === 'providers.deepseek-pool')
+  assert.equal(published.ops[0].value.displayName, 'API Pool')
+  assert.equal(published.ops[0].value.baseURL, `http://127.0.0.1:${RELAY_PORT}${BASE_PATH}`)
+  assert.deepEqual(published.ops[0].value.models.map(model => model.id), ['deepseek-flash'])
+
+  // The relay advertises the same configured model list.
   const models = await (await fetch(`http://127.0.0.1:${RELAY_PORT}${BASE_PATH}/models`, {
     headers: { authorization: `Bearer ${credentials.get(RELAY_TOKEN_REF)}` },
   })).json()
   assert.deepEqual(models.data.map(model => model.id), ['deepseek-flash'])
 })
 
-test('disposal stops the relay this process owns', async (t) => {
+test('disposal withdraws the provider profile and stops the relay this process owns', async (t) => {
   withHome(t)
-  const { ctx, disposers } = fakeContext()
+  const { ctx, mutations, disposers } = fakeContext()
   apply(ctx, Config({ endpoints: [{ name: 'primary', baseURL: 'https://primary.example/v1', apiKeyEnv: 'K' }] }))
 
   assert.equal(await waitFor(async () => {
@@ -105,5 +114,9 @@ test('disposal stops the relay this process owns', async (t) => {
   }), true)
 
   for (const dispose of disposers) await dispose()
+  assert.deepEqual(
+    mutations.find(entry => entry.ops[0]?.op === 'unset')?.ops[0],
+    { op: 'unset', path: ['providers', 'deepseek-pool'] },
+  )
   await assert.rejects(() => fetch(`http://127.0.0.1:${RELAY_PORT}/healthz`, { signal: AbortSignal.timeout(500) }))
 })

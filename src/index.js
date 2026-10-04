@@ -22,16 +22,15 @@ import { Config, plainConfig, resolvePoolConfig } from './config.js'
 import { ApiPool, StateStore } from './pool/pool.js'
 import { EventLog } from './pool/events.js'
 import { Relay } from './relay.js'
+import { buildProviderProfile, ensureProviderProfile, jsonEqual, removeProviderProfile, storedProfile } from './provider.js'
 
 export { Config } from './config.js'
 
 export const name = 'dsh-api-pool'
 export const inject = ['settings']
 
-/** The provider route the bundle declares. Mirrored by `PROVIDER_MODELS`. */
+/** The provider route the plugin publishes into the `llm-pi-ai` namespace. */
 export const PROVIDER_ID = 'deepseek-pool'
-/** Models the bundle's provider profile advertises. */
-export const PROVIDER_MODELS = Object.freeze(['deepseek-flash'])
 /** Loopback port the bundle's provider profile points at (override only for tests/ops). */
 export const RELAY_PORT = Number(process.env.DSH_API_POOL_PORT ?? 8765)
 /** Path prefix the bundle's provider profile uses. */
@@ -116,6 +115,8 @@ export function apply(ctx, config) {
     relay: undefined,
     ownsRelay: false,
     config: undefined,
+    exposedId: undefined,
+    syncing: false,
     keyCache: new Map(),
   }
 
@@ -142,15 +143,62 @@ export function apply(ctx, config) {
     throw new Error(`no credential for endpoint "${spec.name}": export ${ref} or store it in Settings → Models`)
   }
 
+  /** Publish (or withdraw) the pool route in the `llm-pi-ai` namespace. */
+  async function syncExposure() {
+    // One write at a time: overlapping reconciliations could otherwise both
+    // read a stale profile and both write.
+    if (runtime.syncing) return
+    runtime.syncing = true
+    try {
+      await syncExposureOnce()
+    } finally {
+      runtime.syncing = false
+    }
+  }
+
+  async function syncExposureOnce() {
+    const settings = ctx.get('settings')
+    if (settings === undefined) return
+    if (!runtime.config.enabled) {
+      if (runtime.exposedId !== undefined) {
+        await removeProviderProfile(settings, { ns: PROVIDER_SETTINGS_NS, providerId: runtime.exposedId }, ctx.logger)
+        runtime.exposedId = undefined
+      }
+      return
+    }
+    const providerId = PROVIDER_ID
+    const profile = buildProviderProfile({
+      baseURL: `http://127.0.0.1:${RELAY_PORT}${BASE_PATH}`,
+      models: runtime.config.models,
+      api: runtime.config.api,
+      apiKeyEnv: RELAY_TOKEN_REF,
+      displayName: 'API Pool',
+      reasoning: runtime.config.reasoning,
+      thinkingFormat: runtime.config.thinkingFormat,
+      contextWindow: runtime.config.contextWindow,
+      maxTokens: runtime.config.maxTokens,
+    })
+    // Skip an identical write: this document is the live profile, so a no-op
+    // write would chase its own settings-update event.
+    if (jsonEqual(storedProfile(settings, PROVIDER_SETTINGS_NS, providerId), profile)) {
+      runtime.exposedId = providerId
+      return
+    }
+    await ensureProviderProfile(settings, { ns: PROVIDER_SETTINGS_NS, providerId, profile })
+    runtime.exposedId = providerId
+  }
+
   /** Rebuild the pool from current config; start (or reuse) the relay once. */
   async function rebuild() {
     const plain = plainConfig(config)
-    runtime.config = resolvePoolConfig(plain, {
-      events,
-      fetchImpl: fetch,
-      models: [...PROVIDER_MODELS],
-    })
+    runtime.config = resolvePoolConfig(plain, { events, fetchImpl: fetch })
     events.logSuccesses = plain.logSuccesses === true
+    runtime.config.api = plain.api ?? 'openai-completions'
+    runtime.config.reasoning = plain.reasoning ?? 'high'
+    runtime.config.thinkingFormat = plain.thinkingFormat ?? 'deepseek'
+    runtime.config.contextWindow = plain.contextWindow ?? 1_000_000
+    runtime.config.maxTokens = plain.maxTokens ?? 65_536
+    const models = runtime.config.models
 
     runtime.pool = new ApiPool({
       config: runtime.config,
@@ -164,21 +212,29 @@ export function apply(ctx, config) {
       if (await relayAlreadyServing(token)) {
         // Another harness process owns the relay; this one shares its state
         // through the same settings document and does not fight for the port.
-        runtime.relay = new Relay({ pool: runtime.pool, token, basePath: BASE_PATH, models: [...PROVIDER_MODELS], logger: ctx.logger })
+        runtime.relay = new Relay({ pool: runtime.pool, token, basePath: BASE_PATH, models, logger: ctx.logger })
         ctx.logger.info(`api-pool: reusing the relay already listening on http://127.0.0.1:${RELAY_PORT}${BASE_PATH}`)
       } else {
-        const relay = new Relay({ pool: runtime.pool, token, basePath: BASE_PATH, models: [...PROVIDER_MODELS], logger: ctx.logger })
+        const relay = new Relay({ pool: runtime.pool, token, basePath: BASE_PATH, models, logger: ctx.logger })
         try {
           await relay.listen(RELAY_PORT)
           runtime.relay = relay
           runtime.ownsRelay = true
           ctx.logger.info(`api-pool: relay listening on ${relay.url}${BASE_PATH} (token ${tokenFingerprint(token)})`)
         } catch (error) {
-          ctx.logger.error(`api-pool: could not bind 127.0.0.1:${RELAY_PORT}; the declared provider profile points there. ${String(error)}`)
+          ctx.logger.error(`api-pool: could not bind 127.0.0.1:${RELAY_PORT}; the provider profile points there. ${String(error)}`)
         }
       }
     } else {
       runtime.relay.pool = runtime.pool
+      runtime.relay.models = models
+    }
+
+    try {
+      await syncExposure()
+    } catch (error) {
+      ctx.logger.error(`api-pool: could not publish provider "${PROVIDER_ID}" through the "${PROVIDER_SETTINGS_NS}" settings namespace`)
+      ctx.logger.error(error)
     }
 
     if (runtime.config.endpoints.length === 0) {
@@ -219,6 +275,18 @@ export function apply(ctx, config) {
     })
   })
 
+  // Another writer (a settings edit, a profile reload, or a hand edit) can drop
+  // the provider profile; re-assert it. The write is skipped when the stored
+  // profile already matches, so this cannot feed back into its own trigger.
+  const reconcile = () => {
+    if (runtime.config === undefined) return
+    void syncExposure().catch((error) => {
+      ctx.logger.warn(`api-pool: could not re-assert the provider profile: ${String(error)}`)
+    })
+  }
+  ctx.on('settings/document-updated', reconcile)
+  ctx.on('app-boot/config-reload', reconcile)
+
   // A `/api-pool` command surfaces live endpoint health inside the chat.
   ctx.inject(['commands'], (child) => {
     child.effect(() => child.commands.register({
@@ -243,7 +311,11 @@ export function apply(ctx, config) {
   })
 
   ctx.effect(() => async () => {
+    const settings = ctx.get('settings')
+    if (settings !== undefined && runtime.exposedId !== undefined) {
+      await removeProviderProfile(settings, { ns: PROVIDER_SETTINGS_NS, providerId: runtime.exposedId }, ctx.logger)
+    }
     if (runtime.ownsRelay) await runtime.relay?.close()
     store.save(runtime.pool?.state)
-  }, 'api-pool: stop the relay this process owns')
+  }, 'api-pool: withdraw the provider profile and stop the relay this process owns')
 }

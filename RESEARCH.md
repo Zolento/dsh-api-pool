@@ -120,6 +120,8 @@ DSH 会话 LLM
 | --- | --- |
 | 自建 `LlmAdapter` + `PiAiAdapter`（每端点一个实例） | 需要 `resolveProfiles`/`createModels` 等内部函数；已发布包不含 `src/`，不可行 |
 | 自写 OpenAI-compatible 适配器 | 需要重做 DSH 消息/工具/流式翻译（pi-ai 已实现），重复且高风险 |
+| 把 profile 写进 bundle 的 `cordis.patch.yml`（声明式） | 实测不可行：loader 对 patch 条目的 `config` 子树是**替换**而非深合并，用户的 profile 只要配置了 `llm-pi-ai`，后一层的 `providers` 就会覆盖 bundle 声明的那条（`dsh web --dump-config` 中该条消失，provider 也不出现在选择器里）。因此 profile 必须写进拥有 `llm-pi-ai.providers` 的那一层，即设置文档。 |
+| 每次启动写设置文档（无保护） | 端口会变，短命进程（`--dump-config`）会把过期 URL 写进文档。改用**固定端口 + 内容相同则跳过 + 单飞**后，写入幂等且不会自我触发。 |
 
 ## 4. 环境事实（本机）
 

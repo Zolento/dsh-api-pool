@@ -30,6 +30,15 @@ const endpointSchema = z.object({
 export const Config = z.object({
   enabled: z.boolean().default(true).volatile(),
   strategy: z.union(['least_loaded', 'priority', 'round_robin']).default('least_loaded').volatile(),
+
+  // Provider profile published through the `llm-pi-ai` settings namespace.
+  models: z.array(z.string()).default(['deepseek-flash']).volatile(),
+  api: z.string().default('openai-completions').volatile(),
+  reasoning: z.union(['off', 'low', 'high', 'max']).default('high').volatile(),
+  thinkingFormat: z.string().default('deepseek').volatile(),
+  contextWindow: z.number().step(1).min(1).default(1_000_000).volatile(),
+  maxTokens: z.number().step(1).min(1).default(65_536).volatile(),
+
   endpoints: z.array(endpointSchema).default([]).volatile(),
 
   // Pool tuning (milliseconds).
@@ -124,6 +133,16 @@ export function resolvePoolConfig(plain, extras = {}) {
     logSuccesses: plain.logSuccesses === true,
     cooldowns,
     endpoints: normalizeEndpoints(plain.endpoints),
+    models: normalizeModels(plain.models),
     ...extras,
   }
+}
+
+/** The models advertised for the routed provider, deduplicated and non-empty. */
+export function normalizeModels(raw) {
+  const models = (Array.isArray(raw) ? raw : [])
+    .map(value => (typeof value === 'string' ? value.trim() : ''))
+    .filter(value => value !== '')
+  const unique = [...new Set(models)]
+  return unique.length === 0 ? ['deepseek-flash'] : unique
 }

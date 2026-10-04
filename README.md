@@ -31,14 +31,17 @@ DSH 已发布的包只包含编译后的入口（`@deepseek-ai/dsh-llm-pi-ai` �
 也无法自己构造 `ResolvedPiAiProviderProfile`。若自己重写适配器，则要重做 DSH ↔ provider
 的消息 / 工具 / 流式翻译。因此本插件选择：
 
-1. 用 **bundle patch 声明式地**在 `llm-pi-ai` 命名空间里注册 provider profile
-   （`cordis.patch.yml`），协议处理全部交给 DSH；
+1. 宿主插件在 **`llm-pi-ai` 设置命名空间**里幂等地 upsert 一条 `deepseek-pool` provider
+   profile（协议处理全部交给 DSH，插件不碰消息/流式翻译）；
 2. 插件只运行一个 **OpenAI 兼容的本地回环中继**，把池逻辑做在转发层——与 Python 版
    「只替换 client 对象」的语义一致。
 
-声明式 profile 还有一个关键好处：**不写用户的设置文档**。否则任何一次短命的 `dsh`
-进程（例如 `--dump-config`）挂载 profile 时都会写入一个启动完就失效的端口，并且会让
-同时运行的第二个实例互相覆盖。
+> 为什么不把 profile 写进 bundle 的 `cordis.patch.yml`？loader 对 patch 条目的 `config`
+> 子树是**替换**而不是深合并；只要用户的 profile 自己配置了 `llm-pi-ai`（几乎总是如此），
+> 后一层的 `providers` 就会覆盖 bundle 声明的那条。因此这条 profile 必须写进**拥有
+> `llm-pi-ai.providers` 的那一层**，也就是设置文档——这正是本插件做的。写入是幂等的
+> （内容相同就跳过），中继端口固定为 `127.0.0.1:8765`，所以写入的 profile 不会在下次
+> 启动时失效；第二个实例检测到端口已被同类中继占用时会复用而不抢占。
 
 ## 安装
 
@@ -51,8 +54,9 @@ dsh plugin --profile web add /home/lenovo/code/dsh-plugin/dsh-api-pool
 安装会：
 
 - 把 `dsh-api-pool` 加入 `~/.dsh/profiles/web/package.json` 的依赖与 `dsh.profile.bundles`；
-- 由 bundle 的 `cordis.patch.yml` 插入宿主插件，并声明 `llm-pi-ai` 的 `deepseek-pool` profile；
-- 首次启动时把中继 token 写入 `~/.dsh/.credentials.yaml` 的 `DSH_API_POOL_LOCAL_KEY`。
+- 由 bundle 的 `cordis.patch.yml` 插入宿主插件；
+- 首次启动时把中继 token 写入 `~/.dsh/.credentials.yaml` 的 `DSH_API_POOL_LOCAL_KEY`，
+  并把 `deepseek-pool` provider profile 写入 `llm-pi-ai` 的设置命名空间（幂等）。
 
 卸载：
 
@@ -60,16 +64,21 @@ dsh plugin --profile web add /home/lenovo/code/dsh-plugin/dsh-api-pool
 dsh plugin --profile web remove dsh-api-pool
 ```
 
-因为 provider profile 在 bundle 层声明，卸载后自动消失；`~/.dsh/api-pool/` 与
-`DSH_API_POOL_LOCAL_KEY` 可手动删除。
+`plugin remove` 不会自动删掉设置文档里那条 provider profile；删除该文件里
+`llm-pi-ai.providers.deepseek-pool` 段即可（`~/.dsh/api-pool/` 与
+`DSH_API_POOL_LOCAL_KEY` 也可手动删除）。
 
 ## 使用
 
 ### 1. 在 provider 里选择
 
-重启后，模型选择器 / Models 设置页会出现 **API Pool**（`deepseek-pool`），模型
-`deepseek-flash`。选中它即可，池会在后台自动选端点。也可以把默认模型设为
+模型选择器 / Models 设置页会出现 **API Pool**（`deepseek-pool`），模型列表来自插件配置的
+`models`（默认 `deepseek-flash`）。选中它即可，池会在后台自动选端点。也可以把默认模型设为
 `deepseek-pool/deepseek-flash`（`agent-default-model`）。
+
+> 池的模型与「当前选中的 provider 模型」无关：例如你现在用 `ustc/deepseek-flash`，池默认
+> 仍然是 `deepseek-flash`（因为 `models` 默认就是它）。每个端点还可以用
+> `endpoints[].model` 覆盖发给上游的模型名。
 
 ### 2. 在设置里管理 API
 
@@ -79,7 +88,8 @@ dsh plugin --profile web remove dsh-api-pool
   （环境变量名或凭据名，如 `USTC_API_KEY`）、可选模型覆盖、优先级、RPM 上限；
 - 启用 / 停用某个端点；
 - 删除端点；
-- 选择策略：`least_loaded`（默认，按 RPM 窗口负载）/ `priority` / `round_robin`。
+- 选择策略：`least_loaded`（默认，按 RPM 窗口负载）/ `priority` / `round_robin`；
+- 编辑 provider 暴露的 **模型（逗号分隔）**，例如 `deepseek-flash, deepseek-flash-2`。
 
 修改会即时生效（volatile 配置热更新），无需重启。
 
@@ -103,6 +113,11 @@ dsh-api-pool — 3 endpoint(s), strategy=least_loaded
 | --- | --- | --- |
 | `enabled` | `true` | 池总开关（关闭时中继返回 503） |
 | `strategy` | `least_loaded` | `least_loaded` \| `priority` \| `round_robin` |
+| `models` | `['deepseek-flash']` | provider 暴露的模型列表（逗号分隔编辑） |
+| `api` | `openai-completions` | provider profile 的协议 |
+| `reasoning` | `high` | provider profile 的默认思考强度 |
+| `thinkingFormat` | `deepseek` | provider profile 的 `compat.thinkingFormat` |
+| `contextWindow` / `maxTokens` | `1000000` / `65536` | profile 里每个模型的容量声明 |
 | `endpoints[].name` | 必填 | 端点名，日志/状态里的标识 |
 | `endpoints[].baseURL` | 必填 | OpenAI 兼容根地址（自动去掉末尾 `/`） |
 | `endpoints[].apiKeyEnv` | — | 凭据引用；解析顺序：`apiKey` → 环境变量 → `ctx.credentials` |
@@ -178,21 +193,21 @@ ACCEPTANCE_BOOT=1 DSH_API_POOL_LIVE=1 bash scripts/acceptance.sh   # 再发一�
 ```
 
 覆盖：错误分类、冷却/禁用状态机、三种选择策略、配额探测、请求循环故障切换、
-中继（SSE 透传、token 校验、503）、宿主装配、浏览器半的模块契约、
-以及**声明式 profile 与代码常量的防漂移检查**。
+中继（SSE 透传、token 校验、503）、宿主装配（含 profile 发布与撤回）、浏览器半的模块契约。
 
 ## 已知限制
 
-- **单实例固定端口**：provider profile 固定在 `127.0.0.1:8765`。第一个启动的实例拥有
-  中继，后续实例复用（通过 `/healthz` + token 判断），不会互相抢占。若 8765 被无关进程
-  占用，插件会记录错误，provider 会连接失败——改端口需要同时改
-  `cordis.patch.yml` 的 `baseURL`（`RELAY_PORT` 常量在 `src/index.js`）。
-- **多模型**：模型的权威列表在 `cordis.patch.yml` 的 profile 里（当前
-  `deepseek-flash`）。要增加 `deepseek-flash-2`，在 profile 的 `models` 里加一项
-  （并同步 `src/index.js` 的 `PROVIDER_MODELS`，防漂移测试会检查）。
+- **单实例固定端口**：provider profile 指向 `127.0.0.1:8765`。第一个启动的实例拥有中继，
+  后续实例复用（通过 `/healthz` + token 判断），不会互相抢占。若 8765 被无关进程占用，
+  插件会记录错误、provider 会连接失败；改端口需要同时改 `src/index.js` 的 `RELAY_PORT`
+  与已写入的 profile（插件下次启动会按新端口重写）。
+- **卸载残留**：`plugin remove` 不会自动删除设置文档里的 `deepseek-pool` profile，
+  需手动删除该段（或在删除前先在设置里停用）。
+- **短命进程**：像 `dsh web --dump-config` 这样会挂载 profile 的命令会短暂绑定 8765，
+  进程退出后端口释放；因为端口固定，写入的 profile 不会因此失效。
 - **流式中途失败不换端点**：已开始输出后按原样结束。
-- **浏览器 UI 未人工点击验证**：设置页与 provider 选择通过真实组合、真实启动、
-  中继探测、模块契约测试与真实补全验证；未在浏览器里逐一点击。
+- **浏览器 UI 未人工点击验证**：设置页与 provider 选择通过真实组合、真实启动、中继探测、
+  模块契约测试与真实补全验证；未在浏览器里逐一点击。
 - **配额探测针对 LiteLLM 风格代理**：`/key/info`、`/user/info` 与 `x-litellm-*` 头；
   其他代理下探测自然失败，仅退化为无配额信息（不影响故障切换）。
 
