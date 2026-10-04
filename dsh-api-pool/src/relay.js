@@ -13,7 +13,8 @@
  */
 
 import { createServer } from 'node:http'
-import { Readable } from 'node:stream'
+import { Readable, Transform } from 'node:stream'
+import { StringDecoder } from 'node:string_decoder'
 import { pipeline } from 'node:stream/promises'
 import { classifyError, classifyTransportError } from './pool/kinds.js'
 
@@ -78,6 +79,62 @@ function sendError(res, status, message, code) {
   res.end(payload)
 }
 
+/**
+ * Pass-through that picks the final `usage` object out of an SSE stream.
+ *
+ * Streaming responses carry no cost header and, unless asked, no usage either,
+ * so the relay injects `stream_options.include_usage` and reads the number back
+ * from the wire. It never alters a byte: the chunk is forwarded unchanged.
+ */
+class UsageScanner extends Transform {
+  #buffer = ''
+  #decoder = new StringDecoder('utf8')
+  /** Last usage object seen, if any. */
+  usage = undefined
+
+  _transform(chunk, _encoding, callback) {
+    this.#buffer += this.#decoder.write(chunk)
+    let index
+    while ((index = this.#buffer.indexOf('\n')) >= 0) {
+      const line = this.#buffer.slice(0, index).trim()
+      this.#buffer = this.#buffer.slice(index + 1)
+      if (!line.startsWith('data:') || !line.includes('"usage"')) continue
+      const payload = line.slice(5).trim()
+      if (payload === '' || payload === '[DONE]') continue
+      try {
+        const parsed = JSON.parse(payload)
+        if (parsed?.usage !== undefined && typeof parsed.usage === 'object') this.usage = parsed.usage
+      } catch { /* a line this scanner cannot parse is not a stream failure */ }
+    }
+    // A pathological line must not grow the buffer without bound.
+    if (this.#buffer.length > 65_536) this.#buffer = this.#buffer.slice(-4096)
+    callback(null, chunk)
+  }
+}
+
+/**
+ * Buffer a non-streaming JSON body so its `usage` object can be read after the
+ * response completes. Bounded, and it still forwards every byte unchanged.
+ */
+class JsonUsageScanner extends Transform {
+  #buffer = Buffer.alloc(0)
+  /** Usage object once the body settled, if any. */
+  usage = undefined
+
+  _transform(chunk, _encoding, callback) {
+    if (this.#buffer.length < 4_000_000) this.#buffer = Buffer.concat([this.#buffer, chunk])
+    callback(null, chunk)
+  }
+
+  _flush(callback) {
+    try {
+      const parsed = JSON.parse(this.#buffer.toString('utf8'))
+      if (parsed?.usage !== undefined && typeof parsed.usage === 'object') this.usage = parsed.usage
+    } catch { /* not a JSON body: nothing to account */ }
+    callback()
+  }
+}
+
 /** Build the upstream request URL for one endpoint. */
 export function upstreamURL(spec) {
   const base = String(spec.baseURL).replace(/\/+$/, '')
@@ -96,12 +153,13 @@ export class Relay {
    * @param {string[]} [options.models] advertised models for `GET /models`.
    * @param {object} [options.logger]
    */
-  constructor({ pool, token, basePath = '/v1', models = [], logger }) {
+  constructor({ pool, token, basePath = '/v1', models = [], logger, streamUsage = true }) {
     this.pool = pool
     this.token = token
     this.basePath = basePath.replace(/\/+$/, '')
     this.models = models
     this.logger = logger
+    this.streamUsage = streamUsage !== false
     this.server = undefined
     this.port = undefined
   }
@@ -237,18 +295,37 @@ export class Relay {
       return
     }
     const source = Readable.fromWeb(upstream.body)
+    // Streaming bodies carry usage as the last SSE event; a non-streaming body
+    // carries it inline. Pick the reader that matches what the endpoint sent.
+    const contentType = upstream.headers?.get?.('content-type') ?? ''
+    const scanner = contentType.includes('text/event-stream') ? new UsageScanner() : new JsonUsageScanner()
     // A dead client must not leave the upstream reader open.
     res.on('error', () => source.destroy())
     res.on('close', () => { if (!res.writableEnded) source.destroy(new Error('client disconnected')) })
     try {
-      await pipeline(source, res)
+      await pipeline(source, scanner, res)
+      this.recordUsage(endpoint, scanner.usage)
     } catch (error) {
       const code = error?.cause?.code ?? error?.code ?? error?.name ?? 'stream_error'
       this.logger?.warn?.(`api-pool relay: upstream body ended early on "${endpoint}" (${code}); closing the response`)
       this.pool.config.events?.emit?.('relay_error', {
         endpoint, code, message: String(error?.message ?? error).slice(0, 300),
       })
+      this.recordUsage(endpoint, scanner.usage)
       if (!res.destroyed) res.destroy()
+    }
+  }
+
+  /** Attribute one streamed response's usage, best-effort. */
+  recordUsage(endpoint, usage) {
+    if (usage === undefined) return
+    try {
+      this.pool.recordUsage(endpoint, {
+        inputTokens: usage.prompt_tokens,
+        outputTokens: usage.completion_tokens,
+      })
+    } catch (error) {
+      this.logger?.warn?.(`api-pool relay: could not record token usage: ${String(error)}`)
     }
   }
 
@@ -256,6 +333,11 @@ export class Relay {
   async attempt(spec, apiKey, parsed, signal, context) {
     const body = { ...parsed }
     if (spec.model !== undefined) body.model = spec.model
+    // Without this a streamed response reports no usage at all, which would
+    // leave the cumulative token (and cost) accounting blind.
+    if (this.streamUsage && body.stream === true && body.stream_options === undefined) {
+      body.stream_options = { include_usage: true }
+    }
     const timeout = AbortSignal.timeout(this.pool.config.requestTimeoutMs)
     const fused = AbortSignal.any([signal, timeout])
     let response

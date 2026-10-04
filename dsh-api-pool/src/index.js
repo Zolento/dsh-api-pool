@@ -271,10 +271,10 @@ export function apply(ctx, config) {
       if (await relayAlreadyServing(token)) {
         // Another harness process owns the relay; this one shares its state
         // through the same settings document and does not fight for the port.
-        runtime.relay = new Relay({ pool: runtime.pool, token, basePath: BASE_PATH, models, logger: ctx.logger })
+        runtime.relay = new Relay({ pool: runtime.pool, token, basePath: BASE_PATH, models, logger: ctx.logger, streamUsage: runtime.config.streamUsage })
         ctx.logger.info(`api-pool: reusing the relay already listening on http://127.0.0.1:${RELAY_PORT}${BASE_PATH}`)
       } else {
-        const relay = new Relay({ pool: runtime.pool, token, basePath: BASE_PATH, models, logger: ctx.logger })
+        const relay = new Relay({ pool: runtime.pool, token, basePath: BASE_PATH, models, logger: ctx.logger, streamUsage: runtime.config.streamUsage })
         try {
           await relay.listen(RELAY_PORT)
           runtime.relay = relay

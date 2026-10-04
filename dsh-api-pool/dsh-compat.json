@@ -1,7 +1,7 @@
 {
   "$comment": "Machine-readable compatibility pin. Updated only after the suite and acceptance pass against a new DSH build. `scripts/check-dsh.mjs` reads this file.",
   "plugin": "dsh-api-pool",
-  "pluginVersion": "0.1.8",
+  "pluginVersion": "0.1.9",
   "dsh": {
     "version": "0.2.0-rc.2",
     "tag": "dsh-v0.2.0-rc.2",

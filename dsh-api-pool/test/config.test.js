@@ -80,3 +80,5 @@ test('jsonEqual drives the idempotent settings write', () => {
   assert.equal(jsonEqual({ a: [1, 2] }, { a: [2, 1] }), false)
   assert.equal(jsonEqual(undefined, undefined), true)
 })
+
+
