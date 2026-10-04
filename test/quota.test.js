@@ -74,14 +74,55 @@ test('a forced refresh probes past the throttle window', async () => {
   assert.equal(calls, afterFirst + 2, 'a forced call probes both records')
 })
 
-test('a round that reads nothing schedules a quicker retry', async () => {
+test('a round that reads nothing reports it and schedules a quicker retry', async () => {
   const { refreshQuotas } = await import('../src/pool/quota.js')
   const { emptyState } = await import('../src/pool/state.js')
   const state = emptyState()
-  const config = { quotaEnabled: true, quotaRefreshMs: 300_000, quotaProbeTimeoutMs: 1000, fetchImpl: async () => ({ ok: false }) }
+  const events = []
+  const config = {
+    quotaEnabled: true, quotaRefreshMs: 300_000, quotaProbeTimeoutMs: 1000,
+    fetchImpl: async () => ({ ok: false }),
+    onEvent: (name, fields) => events.push({ name, fields }),
+  }
   const specs = [{ name: 'a', baseURL: 'https://api.example.com/v1', enabled: true }]
 
-  await refreshQuotas(specs, state, async () => 'k', config, 1000, true)
+  const summary = await refreshQuotas(specs, state, async () => 'k', config, 1000, true)
 
-  assert.equal(state.quotaNextRefreshAt, 61_000, 'a failed round must not wait the full interval')
+  assert.equal(state.quotaNextRefreshAt, 31_000, 'a failed round must not wait the full interval')
+  assert.deepEqual(summary, { discovered: 0, failed: ['a:probe-failed'] })
+  assert.deepEqual(events.map(event => event.name), ['quota_refresh_failed'])
+  assert.match(events[0].fields.endpoints, /a:probe-failed/)
+})
+
+test('a round with no credential says so per endpoint', async () => {
+  const { refreshQuotas } = await import('../src/pool/quota.js')
+  const { emptyState } = await import('../src/pool/state.js')
+  const state = emptyState()
+  const events = []
+  const config = { quotaEnabled: true, quotaRefreshMs: 300_000, quotaProbeTimeoutMs: 1000, fetchImpl: async () => ({ ok: true, json: async () => ({}) }), onEvent: (n, f) => events.push({ n, f }) }
+  const specs = [{ name: 'a', baseURL: 'https://api.example.com/v1', enabled: true }]
+
+  const summary = await refreshQuotas(specs, state, async () => { throw new Error('no credential') }, config, 1000, true)
+
+  assert.deepEqual(summary.failed, ['a:no-credential'])
+  assert.equal(events[0].n, 'quota_refresh_failed')
+})
+
+test('a successful round reports discoveries and logs each one', async () => {
+  const { refreshQuotas } = await import('../src/pool/quota.js')
+  const { emptyState } = await import('../src/pool/state.js')
+  const state = emptyState()
+  const events = []
+  const config = {
+    quotaEnabled: true, quotaRefreshMs: 300_000, quotaProbeTimeoutMs: 1000,
+    fetchImpl: async (url) => ({ ok: true, json: async () => (url.endsWith('/key/info') ? { info: { spend: 5, max_budget: 100, rpm_limit: 20 } } : {}) }),
+    onEvent: (n, f) => events.push({ n, f }),
+  }
+  const specs = [{ name: 'a', baseURL: 'https://api.example.com/v1', enabled: true }]
+
+  const summary = await refreshQuotas(specs, state, async () => 'k', config, 1000, true)
+
+  assert.equal(summary.discovered, 1)
+  assert.deepEqual(events.map(event => event.n), ['quota_refresh'])
+  assert.equal(state.quotaNextRefreshAt, 1000 + 300_000)
 })

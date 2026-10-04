@@ -249,3 +249,24 @@ test('a forced refresh still runs while another round is in flight', async () =>
 
   assert.equal(probes, 4, 'each forced round probes both records, so the second is not swallowed')
 })
+
+test('hasQuotaHints reflects whether any budget figure was read', async () => {
+  let serve = true
+  const fetchImpl = async (url) => (serve
+    ? { ok: true, json: async () => (url.endsWith('/key/info') ? { info: { spend: 5, max_budget: 100, rpm_limit: 20 } } : {}) }
+    : { ok: false })
+  const config = { ...poolConfig(['a']), quotaEnabled: true, quotaRefreshMs: 300_000, quotaProbeTimeoutMs: 1000, fetchImpl }
+  const pool = new ApiPool({ config, resolveKey: async () => 'k', now: () => 1000 })
+
+  assert.equal(pool.hasQuotaHints(), false)
+  await pool.refreshQuotas(true)
+  assert.equal(pool.hasQuotaHints(), true)
+})
+
+test('a failed probe round leaves hasQuotaHints false so startup can retry', async () => {
+  const config = { ...poolConfig(['a']), quotaEnabled: true, quotaRefreshMs: 300_000, quotaProbeTimeoutMs: 1000, fetchImpl: async () => ({ ok: false }) }
+  const pool = new ApiPool({ config, resolveKey: async () => 'k', now: () => 1000 })
+  await pool.refreshQuotas(true)
+  assert.equal(pool.hasQuotaHints(), false)
+  assert.equal(pool.availability().ready, 1, 'an absent hint must not disable the endpoint')
+})

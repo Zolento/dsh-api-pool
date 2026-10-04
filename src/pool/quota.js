@@ -102,15 +102,19 @@ export async function refreshQuotas(specs, state, resolveKey, config, now = Date
     try {
       apiKey = await resolveKey(spec)
     } catch {
-      return undefined
+      return { spec, reason: 'no-credential' }
     }
     const discovered = await probeQuota(spec, apiKey, { fetchImpl: config.fetchImpl ?? fetch, timeoutMs: config.quotaProbeTimeoutMs })
-    return discovered === undefined ? undefined : { spec, discovered }
+    return discovered === undefined ? { spec, reason: 'probe-failed' } : { spec, discovered }
   }))
 
   let discoveredCount = 0
+  const failed = []
   for (const result of results) {
-    if (result === undefined) continue
+    if (result.discovered === undefined) {
+      failed.push(`${result.spec.name}:${result.reason}`)
+      continue
+    }
     discoveredCount += 1
     const entry = endpointState(state, result.spec.name)
     for (const [key, value] of Object.entries(result.discovered)) {
@@ -123,9 +127,12 @@ export async function refreshQuotas(specs, state, resolveKey, config, now = Date
       rpm_limit: entry.rpmLimit,
     })
   }
-  // A round that read nothing (probe throttled, provider unreachable) must not
-  // leave the pool without quota facts for the whole interval.
+  // A round that read nothing (no credential yet, probe throttled, provider
+  // unreachable) must neither stay silent nor wait the whole interval: report it
+  // and retry soon, because until it succeeds every endpoint shows no budget.
   if (enabled.length > 0 && discoveredCount === 0) {
-    state.quotaNextRefreshAt = now + Math.min(config.quotaRefreshMs, 60_000)
+    state.quotaNextRefreshAt = now + Math.min(config.quotaRefreshMs, 30_000)
+    config.onEvent?.('quota_refresh_failed', { endpoints: failed.join(' ') })
   }
+  return { discovered: discoveredCount, failed }
 }
