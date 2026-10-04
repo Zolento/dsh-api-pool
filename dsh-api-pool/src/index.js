@@ -160,7 +160,14 @@ export function apply(ctx, config) {
       runtime.keyCache.set(ref, { at: Date.now(), value: ambient })
       return ambient
     }
-    const credentials = ctx.get('credentials')
+    let credentials = ctx.get('credentials')
+    // During startup the service may not be visible to this fiber yet; a brief
+    // wait is what lets the very first quota probe succeed instead of reading
+    // nothing and deferring the window figures by a whole retry interval.
+    for (let attempt = 0; attempt < 20 && credentials === undefined; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 100))
+      credentials = ctx.get('credentials')
+    }
     if (credentials !== undefined) {
       const hit = await credentials.resolve(ref)
       if (hit !== undefined && typeof hit.value === 'string' && hit.value.length > 0) {
@@ -219,7 +226,11 @@ export function apply(ctx, config) {
   /** Rebuild the pool from current config; start (or reuse) the relay once. */
   async function rebuild() {
     const plain = plainConfig(config)
-    runtime.config = resolvePoolConfig(plain, { events, fetchImpl: fetch })
+    runtime.config = resolvePoolConfig(plain, {
+      events,
+      fetchImpl: fetch,
+      onEvent: (name, fields) => events.emit(name, fields),
+    })
     events.logSuccesses = plain.logSuccesses === true
     runtime.config.api = plain.api ?? 'openai-completions'
     runtime.config.reasoning = plain.reasoning ?? 'high'
@@ -243,9 +254,17 @@ export function apply(ctx, config) {
     // healthy endpoint disabled until the next scheduled refresh.
     if (!runtime.quotaPrimed) {
       runtime.quotaPrimed = true
-      void runtime.pool.refreshQuotas(true).catch((error) => {
-        ctx.logger.warn(`api-pool: startup quota probe failed: ${String(error)}`)
-      })
+      const pool = runtime.pool
+      void (async () => {
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          await pool.refreshQuotas(true).catch((error) => {
+            ctx.logger.warn(`api-pool: startup quota probe failed: ${String(error)}`)
+          })
+          if (pool.hasQuotaHints()) return
+          ctx.logger.warn(`api-pool: startup quota probe found no budget data (attempt ${attempt}/3); retrying`)
+          await new Promise(resolve => setTimeout(resolve, 5000))
+        }
+      })()
     }
 
     if (runtime.relay === undefined) {

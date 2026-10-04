@@ -192,6 +192,11 @@ export class ApiPool {
     await round
   }
 
+  /** Whether any endpoint has a usable budget figure yet. */
+  hasQuotaHints() {
+    return this.specs.some(spec => Number.isFinite(endpointState(this.state, spec.name).maxBudget))
+  }
+
   /** Snapshot of endpoint health, for status surfaces. */
   status() {
     const now = this.now()
