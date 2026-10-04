@@ -42,7 +42,12 @@ const source = resolve(
 
 const results = []
 const installed = run('dsh', ['--version'])?.split('\n')[0].trim()
-results.push({ name: 'installed dsh --version', actual: installed, expected: expected.version })
+results.push({
+  name: 'installed dsh --version',
+  actual: installed,
+  expected: expected.version,
+  ...installed === undefined ? { note: 'dsh is not on PATH; skipping this check' } : {},
+})
 
 let tag
 let commit
