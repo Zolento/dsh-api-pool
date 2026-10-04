@@ -178,3 +178,15 @@ test('an upstream that dies mid-body does not crash the relay process', async ()
     await good.close()
   }
 })
+
+test('healthz reports cumulative spend with a zero fallback', async () => {
+  const { relay, close } = await makeRelay([])
+  try {
+    const health = await (await fetch(`${relay.url}/healthz`)).json()
+    assert.equal(health.ok, true)
+    assert.equal(health.totalSpend, 0, 'no cost known yet must report 0, not undefined or NaN')
+    assert.deepEqual(health.endpoints, [])
+  } finally {
+    await close()
+  }
+})

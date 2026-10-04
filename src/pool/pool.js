@@ -11,7 +11,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { classifyTransportError, summaryOf } from './kinds.js'
-import { emptyState, endpointState, onFailure, onSuccess, recordRequest, applyRecovery, recentRequests, timeUntilAvailable, availabilityOf } from './state.js'
+import { emptyState, endpointState, onFailure, onSuccess, recordRequest, applyRecovery, recentRequests, timeUntilAvailable, availabilityOf, totalSpendOf } from './state.js'
 import { selectEndpoint } from './select.js'
 import { refreshQuotas } from './quota.js'
 
@@ -185,6 +185,8 @@ export class ApiPool {
         rpmLimit: entry.rpmLimit ?? spec.rpmLimit,
         spend: entry.spend,
         maxBudget: entry.maxBudget,
+        /** Cumulative provider-reported spend for this endpoint (0 when unknown). */
+        totalSpend: Number.isFinite(entry.totalSpend) ? entry.totalSpend : 0,
         lastError: entry.lastError,
         lastErrorKind: entry.lastErrorKind,
         totalRequests: entry.totalRequests,
@@ -192,6 +194,15 @@ export class ApiPool {
         successes: entry.successes,
       }
     })
+  }
+
+  /**
+   * Whole-pool cumulative spend since this pool first counted it. Never resets
+   * with a budget window and survives an endpoint being removed from the config.
+   * @returns {{ spendUsd: number, since: number|undefined }}
+   */
+  totals() {
+    return { spendUsd: totalSpendOf(this.state), since: this.state.spendSince }
   }
 
   /**

@@ -20,7 +20,17 @@ export const DEFAULT_COOLDOWNS = Object.freeze({
 
 /** Root of the persisted pool state. */
 export function emptyState() {
-  return { version: 1, updatedAt: 0, roundRobinIndex: 0, quotaNextRefreshAt: 0, endpoints: {} }
+  return {
+    version: 1,
+    updatedAt: 0,
+    roundRobinIndex: 0,
+    quotaNextRefreshAt: 0,
+    // Cumulative provider-reported spend since this pool first counted; it
+    // never resets with a budget window and survives endpoint removal.
+    totalSpend: 0,
+    spendSince: undefined,
+    endpoints: {},
+  }
 }
 
 /** Lazily create and return one endpoint's state entry. */
@@ -40,6 +50,8 @@ export function endpointState(state, name) {
       lastErrorKind: undefined,
       lastErrorAt: undefined,
       lastLatencyMs: undefined,
+      /** Cumulative provider-reported spend for this endpoint (never resets). */
+      totalSpend: 0,
       spend: undefined,
       maxBudget: undefined,
       budgetDuration: undefined,
@@ -143,7 +155,23 @@ export function quotaFromHeaders(entry, headers) {
   if (hit) entry.quotaCheckedAt = Date.now()
 }
 
-/** A successful call clears every transient penalty. */
+/**
+ * The provider-reported cost of one response, or 0.
+ *
+ * A missing or unparseable header counts as 0 rather than failing: the relay
+ * must never break a request because a deployment does not report cost.
+ * @param {object|undefined} headers response headers.
+ * @returns {number} a finite, non-negative USD amount.
+ */
+export function responseCost(headers) {
+  const raw = headerValue(headers, 'x-litellm-response-cost')
+    ?? headerValue(headers, 'x-litellm-response-cost-original')
+  if (raw === undefined) return 0
+  const value = Number(raw)
+  return Number.isFinite(value) && value > 0 ? value : 0
+}
+
+/** A successful call clears every transient penalty and accumulates its cost. */
 export function onSuccess(state, spec, now, latencyMs, headers) {
   const entry = endpointState(state, spec.name)
   entry.cooldownUntil = 0
@@ -153,6 +181,18 @@ export function onSuccess(state, spec, now, latencyMs, headers) {
   entry.successes += 1
   entry.lastLatencyMs = Math.round(latencyMs)
   if (headers !== undefined) quotaFromHeaders(entry, headers)
+
+  const cost = responseCost(headers)
+  if (cost > 0) {
+    entry.totalSpend = (Number.isFinite(entry.totalSpend) ? entry.totalSpend : 0) + cost
+    state.totalSpend = (Number.isFinite(state.totalSpend) ? state.totalSpend : 0) + cost
+    state.spendSince ??= now
+  }
+}
+
+/** Cumulative spend across every endpoint ever counted, or 0. */
+export function totalSpendOf(state) {
+  return Number.isFinite(state?.totalSpend) ? state.totalSpend : 0
 }
 
 /**

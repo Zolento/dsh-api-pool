@@ -4,6 +4,18 @@
 每次发版都打一个形如 `v<插件版本>-dsh<DSH版本>` 的 tag，例如
 `v0.1.0-dsh0.2.0-rc.2`；DSH 升级后若尚未重新验证，不要沿用旧 tag。
 
+## v0.1.4 — dsh0.2.0-rc.2（2026-10-04）
+
+新增**累计消费统计**（逐端点 + 池级总计）：
+
+- 从每个成功响应的 `x-litellm-response-cost` 头累加，写入 `state.json`，**永不清零**，
+  端点被删除后池级总计仍保留；`spendSince` 记录首次计数时间。
+- `/api-pool` 显示每个端点的 `cum=$…` 与 `cumulative spend: $… since …`；
+  `GET /healthz` 增加 `totalSpend` / `spendSince`。
+- **兜底**：成本头缺失、为空或非数字一律计 0；池级总计对 `undefined`/非有限值同样返回 0，
+  不会出现 NaN 或抛错（新增 4 个测试覆盖）。
+- 区分两个口径：`window=` 是预算窗口消费（会随 `budget_reset_at` 清零），`cum=` 才是累计值。
+
 ## v0.1.3 — dsh0.2.0-rc.2（2026-10-04）
 
 **修复配额口径混用（会让健康端点被静默停用）**：本代理对 `USTC_1_API_KEY` 的

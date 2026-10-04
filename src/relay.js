@@ -159,8 +159,15 @@ export class Relay {
   async handle(req, res) {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
     if (url.pathname === '/healthz') {
+      const totals = this.pool.totals()
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, provider: 'dsh-api-pool', endpoints: this.pool.status() }))
+      res.end(JSON.stringify({
+        ok: true,
+        provider: 'dsh-api-pool',
+        totalSpend: totals.spendUsd,
+        spendSince: totals.since,
+        endpoints: this.pool.status(),
+      }))
       return
     }
     if (!this.authorized(req)) {
