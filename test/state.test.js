@@ -143,7 +143,7 @@ test('a quota-exhausted endpoint with no known reset is held for one recheck win
 })
 
 test('key-scope quota headers never mix with a user-scope budget', () => {
-  const entry = endpointState(emptyState(), 'ustc-1')
+  const entry = endpointState(emptyState(), 'secondary')
   // The binding budget came from the user record...
   entry.quotaSource = 'user'
   entry.maxBudget = 100
@@ -158,7 +158,7 @@ test('key-scope quota headers never mix with a user-scope budget', () => {
 })
 
 test('key-scope headers bind both spend and budget when the budget is key-scope', () => {
-  const entry = endpointState(emptyState(), 'ustc')
+  const entry = endpointState(emptyState(), 'primary')
   quotaFromHeaders(entry, { 'x-litellm-key-spend': '95', 'x-litellm-key-max-budget': '100' })
   assert.equal(entry.quotaSource, 'key')
   assert.equal(entry.spend, 95)

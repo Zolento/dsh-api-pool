@@ -97,7 +97,7 @@ test('a credential failure also fails over', async () => {
   const pool = new ApiPool({
     config: poolConfig(['a', 'b']),
     resolveKey: async (spec) => {
-      if (spec.name === 'a') throw new Error('missing USTC_API_KEY')
+      if (spec.name === 'a') throw new Error('missing PRIMARY_API_KEY')
       return 'key'
     },
     now: () => 1000,

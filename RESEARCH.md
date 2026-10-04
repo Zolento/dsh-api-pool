@@ -97,9 +97,9 @@ DSH 会话 LLM
        └─ provider profile: deepseek-pool
             baseURL = http://127.0.0.1:<port>/v1      ← 本插件的“API 池”中继
                  └─ 本插件中继：按策略选端点 → 转发 → 失败分类/冷却/换端点
-                      ├─ ustc   (USTC_API_KEY)
-                      ├─ ustc-1 (USTC_1_API_KEY)
-                      └─ ustc-2 (USTC_2_API_KEY)
+                      ├─ primary   (PRIMARY_API_KEY)
+                      ├─ secondary (SECONDARY_API_KEY)
+                      └─ tertiary (TERTIARY_API_KEY)
 ```
 
 理由：
@@ -128,8 +128,8 @@ DSH 会话 LLM
 - `dsh --version` = `0.2.0-rc.2`；`~/code/deepseek-harness` 在 tag `dsh-v0.2.0-rc.2`，
   工作区干净，未修改 DSH 源码。
 - `~/.dsh/profiles/web/cordis.patch.yml` 已用 `llm-pi-ai` 配置三个 OpenAI-compatible 端点
-  `ustc` / `ustc-1` / `ustc-2`（同一 `https://api.llm.ustc.edu.cn/v1`），
-  key 在 `~/.dsh/.credentials.yaml`（`USTC_API_KEY` / `USTC_1_API_KEY` / `USTC_2_API_KEY`）。
-- 默认模型当前为 `ustc-1/deepseek-flash`。
+  `primary` / `secondary` / `tertiary`（同一 `https://api.example.com/v1`），
+  key 在 `~/.dsh/.credentials.yaml`（`PRIMARY_API_KEY` / `SECONDARY_API_KEY` / `TERTIARY_API_KEY`）。
+- 默认模型当前为 `secondary/deepseek-flash`。
 - 已发布依赖可从 npm 取到（例如 `@deepseek-ai/schemastery@3.18.4`）。
 - Node v22.23.2（原生支持 `.ts` 类型剥离，本项目仍用纯 ESM JS，避免构建步骤）。

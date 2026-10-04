@@ -4,7 +4,7 @@ import { classifyError, classifyTransportError, ErrorKind, parseTimestamp, retry
 
 const REAL_429 = JSON.stringify({
   error: {
-    message: 'Rate limit exceeded for api_key: f54c6463. Limit type: requests. Current limit: 20, Remaining: 0. Limit resets at: 2026-10-03 18:10:19 UTC',
+    message: 'Rate limit exceeded for api_key: a1b2c3d4. Limit type: requests. Current limit: 20, Remaining: 0. Limit resets at: 2026-10-03 18:10:19 UTC',
     type: 'throttling_error',
     param: null,
     code: '429',

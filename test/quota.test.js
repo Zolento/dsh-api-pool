@@ -10,11 +10,11 @@ function fakeFetch({ key, user }) {
   })
 }
 
-const spec = { name: 'ustc-1', baseURL: 'https://api.llm.ustc.edu.cn/v1' }
+const spec = { name: 'secondary', baseURL: 'https://api.example.com/v1' }
 
 test('rootURL strips /v1 and the trailing slash', () => {
-  assert.equal(rootURL('https://api.llm.ustc.edu.cn/v1'), 'https://api.llm.ustc.edu.cn')
-  assert.equal(rootURL('https://api.llm.ustc.edu.cn/v1/'), 'https://api.llm.ustc.edu.cn')
+  assert.equal(rootURL('https://api.example.com/v1'), 'https://api.example.com')
+  assert.equal(rootURL('https://api.example.com/v1/'), 'https://api.example.com')
 })
 
 test('a key-level budget binds, even when the user ratio looks worse', async () => {
@@ -33,7 +33,7 @@ test('a key-level budget binds, even when the user ratio looks worse', async () 
 test('a key with no budget falls back to the user record (the real proxy case)', async () => {
   const discovered = await probeQuota(spec, 'k', {
     fetchImpl: fakeFetch({
-      // Exactly what this proxy returns for USTC_1_API_KEY: the key carries a
+      // Exactly what this proxy returns for one of our keys: it carries a
       // lifetime spend but no budget; the enforced budget is on the user.
       key: { info: { spend: 1281.8, max_budget: null, rpm_limit: 20 } },
       user: { user_info: { spend: 89.26, max_budget: 100, budget_duration: '24h', budget_reset_at: '2026-10-04T16:00:00Z', rpm_limit: 2147483647 } },

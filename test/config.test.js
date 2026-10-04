@@ -20,16 +20,16 @@ test('defaults are a least-loaded pool advertising deepseek-flash', () => {
 test('a configured endpoint survives resolution and invalid rows are dropped', () => {
   const plain = plainConfig(Config({
     endpoints: [
-      { name: 'ustc', baseURL: 'https://api.llm.ustc.edu.cn/v1/', apiKeyEnv: 'USTC_API_KEY' },
+      { name: 'primary', baseURL: 'https://api.example.com/v1/', apiKeyEnv: 'PRIMARY_API_KEY' },
       { name: 'bad', baseURL: 'not a url' },
       { name: '', baseURL: 'https://x.example/v1' },
-      { name: 'ustc', baseURL: 'https://api.llm.ustc.edu.cn/v1' },
-      { name: 'ustc-1', baseURL: 'https://api.llm.ustc.edu.cn/v1', apiKeyEnv: 'USTC_1_API_KEY', priority: 2, rpmLimit: 20 },
+      { name: 'primary', baseURL: 'https://api.example.com/v1' },
+      { name: 'secondary', baseURL: 'https://api.example.com/v1', apiKeyEnv: 'SECONDARY_API_KEY', priority: 2, rpmLimit: 20 },
     ],
   }))
   const endpoints = resolvePoolConfig(plain).endpoints
-  assert.deepEqual(endpoints.map(endpoint => endpoint.name), ['ustc', 'ustc-1'])
-  assert.equal(endpoints[0].baseURL, 'https://api.llm.ustc.edu.cn/v1')
+  assert.deepEqual(endpoints.map(endpoint => endpoint.name), ['primary', 'secondary'])
+  assert.equal(endpoints[0].baseURL, 'https://api.example.com/v1')
   assert.equal(endpoints[0].priority, 100)
   assert.equal(endpoints[1].priority, 2)
   assert.equal(endpoints[1].rpmLimit, 20)
