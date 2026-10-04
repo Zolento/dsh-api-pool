@@ -50,7 +50,9 @@ export const Config = z.object({
   quotaProbeEnabled: z.boolean().default(true).volatile(),
   maxAttemptsPerRequest: z.number().step(1).min(1).default(20).volatile(),
   totalRequestTimeoutMs: z.number().step(1).min(1).default(1_800_000).volatile(),
-  maxBlockWaitMs: z.number().step(1).min(1).default(21_600_000).volatile(),
+  // Stay below undici's default 300s body timeout on the client side: a longer
+  // silent block would make the harness's own fetch abort before we answer.
+  maxBlockWaitMs: z.number().step(1).min(1).default(240_000).volatile(),
   requestTimeoutMs: z.number().step(1).min(1).default(600_000).volatile(),
   failoverOnBadRequest: z.boolean().default(false).volatile(),
   logSuccesses: z.boolean().default(false).volatile(),
@@ -127,7 +129,7 @@ export function resolvePoolConfig(plain, extras = {}) {
     quotaProbeTimeoutMs: 15_000,
     maxAttemptsPerRequest: plain.maxAttemptsPerRequest ?? 20,
     totalRequestTimeoutMs: plain.totalRequestTimeoutMs ?? 1_800_000,
-    maxBlockWaitMs: plain.maxBlockWaitMs ?? 21_600_000,
+    maxBlockWaitMs: plain.maxBlockWaitMs ?? 240_000,
     requestTimeoutMs: plain.requestTimeoutMs ?? 600_000,
     failoverOnBadRequest: plain.failoverOnBadRequest === true,
     logSuccesses: plain.logSuccesses === true,

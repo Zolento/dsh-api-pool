@@ -14,6 +14,7 @@
 
 import { createServer } from 'node:http'
 import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { classifyError, classifyTransportError } from './pool/kinds.js'
 
 const MAX_BODY_BYTES = 64 * 1024 * 1024
@@ -105,10 +106,14 @@ export class Relay {
   listen(port = 0) {
     if (this.server !== undefined) return Promise.resolve({ port: this.port, url: this.url })
     this.server = createServer((req, res) => {
+      // An unhandled 'error' on either side (client reset, write-after-close)
+      // would surface as an uncaught exception and take the harness down.
+      req.on('error', error => this.logger?.warn?.(`api-pool relay: request error: ${String(error)}`))
+      res.on('error', error => this.logger?.warn?.(`api-pool relay: response error: ${String(error)}`))
       this.handle(req, res).catch((error) => {
         this.logger?.warn?.(`api-pool relay: unhandled request failure: ${String(error)}`)
         if (!res.headersSent) sendError(res, 500, String(error?.message ?? error), 'relay_error')
-        else res.destroy()
+        else if (!res.destroyed) res.destroy()
       })
     })
     return new Promise((resolve, reject) => {
@@ -182,7 +187,12 @@ export class Relay {
     }
 
     const controller = new AbortController()
-    req.on('close', () => controller.abort(new Error('client disconnected')))
+    // Detect a *client disconnect*: `req`'s 'close' fires on normal request
+    // completion too (Node emits it once the body is read), so only the
+    // response's close — before we finished writing it — means the caller left.
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort(new Error('client disconnected'))
+    })
 
     let result
     try {
@@ -198,15 +208,33 @@ export class Relay {
     const upstream = result.response
     res.statusCode = upstream.status
     copyResponseHeaders(upstream, res)
-    if (upstream.body === null) {
+    await this.forwardBody(upstream, result.endpoint, res)
+  }
+
+  /**
+   * Forward one upstream body to the client, containing every asynchronous
+   * failure. An upstream that stalls or resets mid-body makes the web stream
+   * reject; without this, the resulting 'error' event is unhandled and kills
+   * the whole harness process.
+   */
+  async forwardBody(upstream, endpoint, res) {
+    if (upstream.body === null || upstream.body === undefined) {
       res.end()
       return
     }
+    const source = Readable.fromWeb(upstream.body)
+    // A dead client must not leave the upstream reader open.
+    res.on('error', () => source.destroy())
+    res.on('close', () => { if (!res.writableEnded) source.destroy(new Error('client disconnected')) })
     try {
-      Readable.fromWeb(upstream.body).pipe(res)
+      await pipeline(source, res)
     } catch (error) {
-      this.logger?.warn?.(`api-pool relay: failed to pipe upstream response: ${String(error)}`)
-      res.destroy()
+      const code = error?.cause?.code ?? error?.code ?? error?.name ?? 'stream_error'
+      this.logger?.warn?.(`api-pool relay: upstream body ended early on "${endpoint}" (${code}); closing the response`)
+      this.pool.config.events?.emit?.('relay_error', {
+        endpoint, code, message: String(error?.message ?? error).slice(0, 300),
+      })
+      if (!res.destroyed) res.destroy()
     }
   }
 

@@ -15,7 +15,13 @@ async function upstream(handler) {
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
   const { port } = server.address()
-  return { url: `http://127.0.0.1:${port}/v1`, close: () => new Promise(resolve => server.close(resolve)) }
+  return {
+    url: `http://127.0.0.1:${port}/v1`,
+    close: () => new Promise((resolve) => {
+      server.closeAllConnections?.()
+      server.close(() => resolve())
+    }),
+  }
 }
 
 async function makeRelay(endpoints, token = 'secret-token') {
@@ -128,5 +134,47 @@ test('advertises configured models on GET /v1/models', async () => {
     assert.deepEqual(body.data.map(model => model.id), ['deepseek-flash'])
   } finally {
     await close()
+  }
+})
+
+test('an upstream that dies mid-body does not crash the relay process', async () => {
+  let uncaught
+  const onUncaught = (error) => { uncaught = error }
+  process.once('uncaughtException', onUncaught)
+
+  // Sends headers and part of the body, then drops the socket: exactly the
+  // shape of an undici body timeout / upstream reset mid-stream.
+  const flaky = await upstream((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    res.write('data: {"choices":[{"delta":{"content":"par"}}]}\n\n')
+    setTimeout(() => res.socket.destroy(), 20)
+  })
+  const good = await upstream((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    res.end('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n')
+  })
+  const { relay, close } = await makeRelay([
+    { name: 'a', baseURL: flaky.url, apiKey: 'k0' },
+    { name: 'b', baseURL: good.url, apiKey: 'k1' },
+  ])
+  try {
+    // The caller sees a truncated stream (headers were already committed)...
+    await post(relay, { model: 'deepseek-flash', messages: [], stream: true }).catch(() => {})
+    await new Promise(resolve => setTimeout(resolve, 150))
+
+    // ...but the process must survive and keep serving.
+    const health = await (await fetch(`${relay.url}/healthz`)).json()
+    assert.equal(health.ok, true, 'the relay stopped serving after an upstream mid-body failure')
+    assert.equal(uncaught, undefined, `the relay raised an uncaught exception: ${uncaught}`)
+
+    // A subsequent request is still handled normally.
+    const next = await post(relay, { model: 'deepseek-flash', messages: [], stream: true })
+    assert.equal(next.status, 200)
+    assert.match(next.text, /"ok"/)
+  } finally {
+    process.off('uncaughtException', onUncaught)
+    await close()
+    await flaky.close()
+    await good.close()
   }
 })
