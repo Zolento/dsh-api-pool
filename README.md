@@ -93,6 +93,25 @@ dsh plugin --profile web remove dsh-api-pool
 
 修改会即时生效（volatile 配置热更新），无需重启。
 
+### 远程访问（frp / 非 loopback）时的限制
+
+DSH 只把 **Host 设置**开放给从 `127.0.0.1` / `localhost` 打开的页面：
+`ctx.connection.isLoopback` 由浏览器 `window.location.hostname` 判定
+（`localhost`、`[::1]`、`127.0.0.0/8`），非 loopback 时 `ui-settings` 把持久化切到
+`memory`，`configForms` 直接进入 `status: 'unavailable'`（只读、也读不到值）。
+`dsh web --trusted-host <域名>` 只放宽 `/api` 的请求信任围栏，**不会**让设置变成可写。
+
+所以在 frp 域名下：
+
+- **聊天、模型选择、API 池的实际调用都正常**（只有设置页受此限制）；
+- **API Pool 设置页不可读写**，页面会明确提示原因，这不代表插件没装好；
+- 要管理端点，任选其一：
+  1. SSH 端口转发后用 loopback 打开：`ssh -N -L 3080:127.0.0.1:3080 <user>@<host>`，
+     再访问 `http://127.0.0.1:3080`（浏览器地址栏是 `127.0.0.1` 即可）；
+  2. 在宿主上直接编辑 `~/.dsh/profiles/web/cordis.patch.yml` 里 `- id: dsh-api-pool`
+     的 `config.endpoints`，DSH 会热应用（必要时重启一次）；
+  3. 用宿主机本地的浏览器打开 `http://127.0.0.1:3080`。
+
 ### 3. 查看健康状态
 
 聊天里输入 `/api-pool`：
