@@ -153,7 +153,7 @@ dsh-api-pool — 3 endpoint(s), strategy=least_loaded
 | `quotaProbeEnabled` | `true` | 是否探测 `/key/info`、`/user/info` |
 | `maxAttemptsPerRequest` | `20` | 单次请求最多失败尝试数 |
 | `totalRequestTimeoutMs` | `1800000` | 单次请求总时长上限 |
-| `maxBlockWaitMs` | `21600000` | 全端点不可用时的最长阻塞等待 |
+| `maxBlockWaitMs` | `240000` | 全端点不可用时的最长阻塞等待（默认 4 分钟，刻意低于 undici 的 300s body timeout） |
 | `requestTimeoutMs` | `600000` | 单次上游请求超时 |
 | `failoverOnBadRequest` | `false` | 400 是否也换端点 |
 | `logSuccesses` | `false` | 是否记录成功事件 |
@@ -178,7 +178,9 @@ dsh-api-pool — 3 endpoint(s), strategy=least_loaded
 
 只有**在响应正文开始传输之前**失败才会换端点；一旦已经开始流式输出，就按原样结束
 （与 Python 版行为一致）。全部端点不可用时，中继在 `maxBlockWaitMs` 内阻塞轮询，
-超时后返回 503 并给出可操作的信息。
+超时后返回 503 并给出可操作的信息。默认 4 分钟刻意低于 undici 的 300s `bodyTimeout`：
+阻塞更久的话，harness 自己的 fetch 会先在客户端侧超时（`TypeError: terminated` /
+`BodyTimeoutError`），请求白等一场。想等更长的配额窗口可以调大，但要知道这个上限。
 
 ## 配额探测
 
@@ -195,7 +197,7 @@ dsh-api-pool — 3 endpoint(s), strategy=least_loaded
 | 路径 | 内容 |
 | --- | --- |
 | `~/.dsh/api-pool/api-pool.log` | 人类可读：`[FAILOVER] endpoint=... kind=... cooldown-seconds=...` |
-| `~/.dsh/api-pool/api-pool-events.jsonl` | 机器可读（`failover` / `all_endpoints_busy` / `quota_refresh` / `success`） |
+| `~/.dsh/api-pool/api-pool-events.jsonl` | 机器可读（`failover` / `all_endpoints_busy` / `quota_refresh` / `relay_error` / `success`） |
 | `~/.dsh/api-pool/state.json` | 端点健康 / 冷却 / RPM 窗口 / 配额快照 |
 | `~/.dsh/api-pool/relay-token` | 中继共享令牌（0600） |
 

@@ -4,6 +4,22 @@
 每次发版都打一个形如 `v<插件版本>-dsh<DSH版本>` 的 tag，例如
 `v0.1.0-dsh0.2.0-rc.2`；DSH 升级后若尚未重新验证，不要沿用旧 tag。
 
+## v0.1.2 — dsh0.2.0-rc.2（2026-10-04）
+
+**修复进程崩溃（严重）**：中继转发上游响应体用的是
+`Readable.fromWeb(upstream.body).pipe(res)`，异步错误无人接管；上游流式中断/超时
+（undici 默认 300s bodyTimeout，栈里是 `TLSSocket`）时源流 emit `error` →
+`uncaughtException` → **整个 DSH 进程退出**（`dsh: fatal uncaught exception: TypeError: terminated`）。
+改为 `stream/promises.pipeline` 并捕获、记 `relay_error` 事件、干净关闭响应；
+`req`/`res` 也补了 error 监听。回归测试：上游发一半断流后中继必须存活并继续服务
+（临时还原旧写法可复现完全相同的栈）。
+
+- **修复误 abort 上游请求**：原先用 `req.on('close')` 判断客户端断连，但 Node 22 在请求体
+  读完后就会触发（实测 `+1ms, res.writableEnded=false`），会竞态地 abort 正在进行的上游请求。
+  改用 `res.on('close')` + `!res.writableEnded`。
+- **`maxBlockWaitMs` 默认 6h → 240s**：全端点不可用时静默阻塞超过 undici 的 300s
+  bodyTimeout，harness 自己的 fetch 会先超时。新默认刻意低于它；需要等更久可在设置里调大。
+
 ## v0.1.1 — dsh0.2.0-rc.2（2026-10-04）
 
 - 修正远程（frp / 非 loopback）访问时的提示：区分「Host 未提供命名空间」与
