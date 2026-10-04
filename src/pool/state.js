@@ -205,10 +205,6 @@ export function onFailure(state, spec, entry, info, now, config) {
   entry.lastError = info.message.slice(0, 1000)
   entry.lastErrorKind = info.kind
   entry.lastErrorAt = now
-  if (info.retryAfterMs !== undefined && info.retryAfterMs > 0) {
-    // Prefer the provider's own delay when it exceeds ours below.
-  }
-
   if (info.kind === ErrorKind.AUTH) {
     entry.disabledUntil = -1
     entry.disabledReason = 'auth'

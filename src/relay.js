@@ -35,17 +35,23 @@ function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = []
     let size = 0
+    let settled = false
+    const finish = (fn, value) => { if (settled) return; settled = true; fn(value) }
     req.on('data', (chunk) => {
+      if (settled) return
       size += chunk.length
       if (size > MAX_BODY_BYTES) {
-        reject(new Error('request body too large'))
+        finish(reject, new Error('request body too large'))
         req.destroy()
         return
       }
       chunks.push(chunk)
     })
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
-    req.on('error', reject)
+    req.on('end', () => finish(resolve, Buffer.concat(chunks).toString('utf8')))
+    req.on('error', (error) => finish(reject, error))
+    // A client that disconnects mid-body never emits 'end'; without this the
+    // handler would hang until the socket's own timeout.
+    req.on('close', () => finish(reject, new Error('client disconnected while sending the request body')))
   })
 }
 
@@ -64,8 +70,9 @@ function copyResponseHeaders(upstream, res) {
   }
 }
 
-/** One OpenAI-style error response. */
+/** One OpenAI-style error response (skipped when the client is already gone). */
 function sendError(res, status, message, code) {
+  if (res.writableEnded || res.destroyed) return
   const payload = JSON.stringify({ error: { message, type: code, code: String(status) } })
   res.writeHead(status, { 'content-type': 'application/json' })
   res.end(payload)
@@ -279,6 +286,7 @@ export class Relay {
 
   /** Convert a finished pool failure into an HTTP response for the harness. */
   respondWithFailure(res, error) {
+    if (res.writableEnded || res.destroyed) return
     if (!res.headersSent) {
       if (error instanceof RelayFailure && error.upstream !== undefined) {
         res.statusCode = error.upstream.status

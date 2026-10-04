@@ -128,6 +128,13 @@ export function apply(ctx, config) {
     logSuccesses: plainConfig(config).logSuccesses === true,
   })
   const store = new StateStore(join(dir, 'state.json'))
+  // Captured at apply time: re-resolving it during disposal can return
+  // undefined once the registry is torn down, which would silently leave the
+  // published provider profile behind in the user's settings document.
+  const settingsService = ctx.get('settings')
+  if (settingsService === undefined) {
+    ctx.logger.warn('api-pool: this composition has no settings service; the API Pool provider profile cannot be published')
+  }
 
   /** Live runtime, rebuilt on every configuration change. */
   const runtime = {
@@ -178,7 +185,7 @@ export function apply(ctx, config) {
   }
 
   async function syncExposureOnce() {
-    const settings = ctx.get('settings')
+    const settings = settingsService
     if (settings === undefined) return
     if (!runtime.config.enabled) {
       if (runtime.exposedId !== undefined) {
@@ -221,6 +228,8 @@ export function apply(ctx, config) {
     runtime.config.maxTokens = plain.maxTokens ?? 65_536
     const models = runtime.config.models
 
+    // Cancel the previous pool's pending coalesced save before swapping.
+    runtime.pool?.flush()
     runtime.pool = new ApiPool({
       config: runtime.config,
       state: runtime.pool?.state ?? store.load(),
@@ -359,11 +368,12 @@ export function apply(ctx, config) {
   })
 
   ctx.effect(() => async () => {
-    const settings = ctx.get('settings')
+    const settings = settingsService
     if (settings !== undefined && runtime.exposedId !== undefined) {
       await removeProviderProfile(settings, { ns: PROVIDER_SETTINGS_NS, providerId: runtime.exposedId }, ctx.logger)
     }
     if (runtime.ownsRelay) await runtime.relay?.close()
-    store.save(runtime.pool?.state)
+    // Writes the coalesced state immediately (see ApiPool.persist).
+    runtime.pool?.flush()
   }, 'api-pool: withdraw the provider profile and stop the relay this process owns')
 }

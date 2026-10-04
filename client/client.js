@@ -123,7 +123,14 @@ window.__ModuleLoader__.load({
         h('div', { style: { ...row, marginTop: 8 } },
           textField(t('model'), endpoint.model, value => setField('model', value), { disabled: readOnly, placeholder: 'deepseek-flash' }),
           textField(t('priority'), endpoint.priority, value => setField('priority', Number(value) || 100), { disabled: readOnly }),
-          textField(t('rpmLimit'), endpoint.rpmLimit, value => setField('rpmLimit', value === '' ? undefined : Number(value)), { disabled: readOnly }),
+          textField(t('rpmLimit'), endpoint.rpmLimit, (value) => {
+            const parsed = Number(value)
+            // Clearing the field removes the key; writing `undefined` would be
+            // rejected by the settings path validator.
+            onMutate(value.trim() === '' || !Number.isFinite(parsed)
+              ? [{ op: 'unset', path: ['endpoints', index, 'rpmLimit'] }]
+              : [{ op: 'set', path: ['endpoints', index, 'rpmLimit'], value: parsed }])
+          }, { disabled: readOnly }),
         ),
         h('div', { style: { marginTop: 8 } },
           h('button', {
@@ -174,6 +181,9 @@ window.__ModuleLoader__.load({
 
     function ApiPoolSection(props) {
       const { form, t } = props
+      // Settings writes can be refused (a stale revision, an invalid value);
+      // surface that instead of silently snapping the field back.
+      const [writeError, setWriteError] = React.useState(null)
       const snapshot = React.useSyncExternalStore(
         listener => form.subscribe(listener),
         () => form.getSnapshot(),
@@ -187,7 +197,11 @@ window.__ModuleLoader__.load({
       const value = snapshot.value ?? {}
       const endpoints = Array.isArray(value.endpoints) ? value.endpoints : []
       const readOnly = snapshot.writable !== true
-      const mutate = ops => { void form.mutate(ops) }
+      const mutate = (ops) => {
+        void form.mutate(ops)
+          .then((accepted) => { setWriteError(accepted === false ? t('writeFailed') : null) })
+          .catch(() => { setWriteError(t('writeFailed')) })
+      }
 
       const strategySelect = h('label', { style: field },
         h('span', null, t('strategy')),
@@ -219,6 +233,7 @@ window.__ModuleLoader__.load({
         h('h3', { style: { margin: '0 0 8px' } }, t('title')),
         h('p', { style: { fontSize: 13, opacity: 0.8, marginTop: 0 } }, t('intro')),
         readOnly ? h('p', { role: 'status', style: { fontSize: 12, color: '#d19a66' } }, t('readOnly')) : null,
+        writeError === null ? null : h('p', { role: 'alert', style: { fontSize: 12, color: '#e06c75' } }, writeError),
         toggles,
         h('div', { style: row }, strategySelect, modelsField),
         h('h4', { style: { margin: '16px 0 8px', fontSize: 13 } }, t('endpoints')),

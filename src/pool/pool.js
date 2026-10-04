@@ -8,7 +8,7 @@
  * and unit-testable.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { classifyTransportError, summaryOf } from './kinds.js'
 import { emptyState, endpointState, onFailure, onSuccess, recordRequest, applyRecovery, recentRequests, timeUntilAvailable, availabilityOf, totalSpendOf } from './state.js'
@@ -59,7 +59,6 @@ function delay(ms, signal) {
 export class StateStore {
   constructor(file) {
     this.file = file
-    this.lockDir = `${file}.lock`
   }
 
   /** Read the persisted state, or an empty one when absent/corrupt. */
@@ -74,38 +73,23 @@ export class StateStore {
     }
   }
 
-  /** Atomically replace the persisted state; failures are non-fatal. */
+  /**
+   * Atomically replace the persisted state; failures are non-fatal.
+   *
+   * Deliberately lock-free: the pool never does read-modify-write here (state is
+   * loaded once at startup) and every write is a complete temp file published by
+   * `rename`, so a concurrent writer can only be overwritten, never observed
+   * half-written. The previous advisory lock spun synchronously for up to two
+   * seconds on the request path and bought nothing for that access pattern.
+   */
   save(state) {
     try {
       mkdirSync(dirname(this.file), { recursive: true })
-      this.acquire()
-      const tmp = `${this.file}.${process.pid}.tmp`
       state.updatedAt = Date.now()
+      const tmp = `${this.file}.${process.pid}.tmp`
       writeFileSync(tmp, `${JSON.stringify(state, undefined, 2)}\n`)
       renameSync(tmp, this.file)
-    } catch { /* state persistence is best-effort */ } finally {
-      this.release()
-    }
-  }
-
-  acquire() {
-    const deadline = Date.now() + 2_000
-    while (Date.now() < deadline) {
-      try {
-        mkdirSync(this.lockDir)
-        return
-      } catch {
-        try {
-          if (Date.now() - statSync(this.lockDir).mtimeMs > 10_000) rmSync(this.lockDir, { recursive: true, force: true })
-        } catch { /* another process owns the lock */ }
-      }
-    }
-  }
-
-  release() {
-    try {
-      rmSync(this.lockDir, { recursive: true, force: true })
-    } catch { /* best-effort */ }
+    } catch { /* state persistence is best-effort */ }
   }
 }
 
@@ -136,6 +120,8 @@ export class ApiPool {
     this.resolveKey = resolveKey
     this.now = now
     this.sleep = sleep
+    this.saveTimer = undefined
+    this.refreshing = false
   }
 
   /** Normalized endpoint specs in configuration order. */
@@ -143,16 +129,48 @@ export class ApiPool {
     return this.config.endpoints
   }
 
-  /** Persist current state (best-effort). */
+  /**
+   * Schedule a best-effort state save.
+   *
+   * This is called on every request outcome, and `StateStore.save` is
+   * synchronous (atomic rename under an advisory lock, which spins while
+   * another process holds it). Writing per request would stall the event loop,
+   * so saves are coalesced to at most one per second; {@link flush} writes the
+   * final state on shutdown.
+   */
   persist() {
+    if (this.store === undefined || this.saveTimer !== undefined) return
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = undefined
+      this.store.save(this.state)
+    }, 1000)
+    this.saveTimer.unref?.()
+  }
+
+  /** Write the current state now, cancelling a pending coalesced save. */
+  flush() {
+    if (this.saveTimer !== undefined) {
+      clearTimeout(this.saveTimer)
+      this.saveTimer = undefined
+    }
     this.store?.save(this.state)
   }
 
-  /** Refresh quota facts, throttled by the shared deadline.
+  /**
+   * Refresh quota facts, throttled by the shared deadline.
+   *
+   * Concurrent callers share one probe round: a request must never queue behind
+   * another request's network probes.
    * @param {boolean} [force] probe now even inside the throttle window.
    */
   async refreshQuotas(force = false) {
-    await refreshQuotas(this.specs, this.state, this.resolveKey, this.config, this.now(), force)
+    if (this.refreshing) return
+    this.refreshing = true
+    try {
+      await refreshQuotas(this.specs, this.state, this.resolveKey, this.config, this.now(), force)
+    } finally {
+      this.refreshing = false
+    }
   }
 
   /** Snapshot of endpoint health, for status surfaces. */
@@ -171,7 +189,9 @@ export class ApiPool {
       // the state string must say so instead of claiming "ready" while the
       // selector skips the endpoint.
       else if (!availability.available && availability.reason === 'quota') {
-        const percent = entry.maxBudget > 0 ? ` ${Math.min(999, Math.round((entry.spend / entry.maxBudget) * 100))}%` : ''
+        const percent = Number.isFinite(entry.spend) && Number.isFinite(entry.maxBudget) && entry.maxBudget > 0
+          ? ` ${Math.min(999, Math.round((entry.spend / entry.maxBudget) * 100))}%`
+          : ''
         state = `quota(${percent.trim()})`
       }
       return {
@@ -258,7 +278,10 @@ export class ApiPool {
     let lastError
     const excluded = new Set()
 
-    await this.refreshQuotas()
+    // Refresh in the background: a request must not wait on another endpoint's
+    // probe latency, and a stale-by-one-window quota figure is not a reason to
+    // delay a user request. The throttle inside keeps this rare.
+    void this.refreshQuotas().catch(() => {})
 
     while (true) {
       const now = this.now()
