@@ -63,4 +63,18 @@ test('client.js registers the API Pool settings page', async () => {
   const injected = options.inject()
   assert.equal(injected.form.id, 'dsh-api-pool')
   assert.equal(typeof component, 'function')
+
+  // A non-loopback page (frp origin) cannot read Host settings: DSH switches
+  // the form to memory mode, and the page must say so rather than claim the
+  // namespace is missing.
+  const unavailable = (mode) => component({
+    ...injected,
+    form: {
+      getSnapshot: () => ({ status: 'unavailable', mode, value: undefined, writable: false }),
+      subscribe: () => () => {},
+      mutate: async () => false,
+    },
+  })
+  assert.equal(unavailable('memory').children[0], 'unavailableMemory')
+  assert.equal(unavailable('host').children[0], 'unavailableHost')
 })

@@ -42,7 +42,8 @@ window.__ModuleLoader__.load({
         save: '保存',
         cancel: '取消',
         loading: '正在读取配置…',
-        unavailable: '此页面需要 Host 提供 dsh-api-pool 设置命名空间。',
+        unavailableHost: 'Host 未提供 dsh-api-pool 设置命名空间（插件未挂载或已停用）。',
+        unavailableMemory: 'DSH 的 Host 设置只能在从 127.0.0.1 / localhost 打开的页面读写。当前页面来自非 loopback 源（例如 frp 域名），所以设置被切到进程内只读模式——聊天和模型选择不受影响。要管理端点：用 SSH 端口转发后访问 http://127.0.0.1:3080，或在宿主上直接编辑 profile 的 dsh-api-pool 配置。',
         readOnly: '当前配置只读。',
         writeFailed: '写入被拒绝，请检查值是否合法。',
         advanced: '高级',
@@ -71,7 +72,8 @@ window.__ModuleLoader__.load({
         save: 'Save',
         cancel: 'Cancel',
         loading: 'Loading configuration…',
-        unavailable: 'This page needs the Host to serve the dsh-api-pool settings namespace.',
+        unavailableHost: 'The Host does not serve the dsh-api-pool settings namespace (plugin not mounted or disabled).',
+        unavailableMemory: 'DeepSeek Harness serves Host settings only to pages opened from 127.0.0.1 / localhost. This page came from a non-loopback origin (for example an frp domain), so settings are process-local and read-only here — chat and model selection are unaffected. To manage endpoints, open http://127.0.0.1:3080 through an SSH port forward, or edit the dsh-api-pool config in the Host profile file.',
         readOnly: 'Configuration is read-only.',
         writeFailed: 'The write was refused; check the values.',
         advanced: 'Advanced',
@@ -177,7 +179,11 @@ window.__ModuleLoader__.load({
         () => form.getSnapshot(),
       )
       if (snapshot.status === 'loading') return h('p', null, t('loading'))
-      if (snapshot.status === 'unavailable') return h('p', null, t('unavailable'))
+      if (snapshot.status === 'unavailable') {
+        // `memory` mode means DSH refused Host settings for this page origin
+        // (non-loopback); `host` mode means the namespace really is absent.
+        return h('p', null, t(snapshot.mode === 'memory' ? 'unavailableMemory' : 'unavailableHost'))
+      }
       const value = snapshot.value ?? {}
       const endpoints = Array.isArray(value.endpoints) ? value.endpoints : []
       const readOnly = snapshot.writable !== true
