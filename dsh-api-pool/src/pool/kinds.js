@@ -28,10 +28,14 @@ const CURRENT_LIMIT_RE = /Current limit[:\s]*(\d+)/i
 const REMAINING_RE = /Remaining[:\s]*(\d+)/i
 const ERROR_TYPE_RE = /"type"\s*:\s*"([^"]+)"/i
 
-const BUDGET_RE = /budget|insufficient_quota|insufficient balance|quota|out of credit|billing|credit balance|balance is too low|exceeded your current|budget_exceeded|quota_exceeded/i
+// Deliberately narrow: a bare "budget"/"billing"/"quota" word appears in plenty
+// of ordinary 400s ("invalid billing profile"), and matching those would bench a
+// healthy endpoint for the whole quota-recheck window. The provider's own error
+// type (`budget_exceeded`, …) is matched separately.
+const BUDGET_RE = /exceeded[\s_-]*budget|budget[\s_-]?(?:exceeded|exhausted)|insufficient[\s_-]?(?:quota|balance|credits?)|quota[\s_-]?(?:exceeded|exhausted)|out of (?:credits?|budget)|(?:credit|balance)\s+is\s+too\s+low|exceeded your current quota/i
 const AUTH_RE = /invalid api key|incorrect api key|authentication|unauthorized|api key not valid|no auth credentials|auth_error|permission denied/i
 const TIMEOUT_RE = /timeout|timed out|ETIMEDOUT|UND_ERR_CONNECT_TIMEOUT|aborted/i
-const CONNECTION_RE = /ECONNREFUSED|ECONNRESET|EPIPE|ENOTFOUND|EAI_AGAIN|socket hang up|connection error|other side closed|fetch failed|network/i
+const CONNECTION_RE = /ECONNREFUSED|ECONNRESET|EPIPE|ENOTFOUND|EAI_AGAIN|socket hang up|connection error|other side closed|fetch failed|other side closed|Terminated|premature close|network error/i
 
 /** Parse a service timestamp (ISO-8601 or ``... UTC``) into epoch milliseconds. */
 export function parseTimestamp(value) {
@@ -124,29 +128,41 @@ export function classifyError({ status, headers, body } = {}) {
     info.resetAt = parseTimestamp(`${reset[1]}${suffix}`)
   }
 
+  const hasStatus = Number.isInteger(info.httpStatus)
   let isBudget = BUDGET_RE.test(text)
     || ['budget_exceeded', 'insufficient_quota', 'quota_exceeded'].includes((errorType ?? '').toLowerCase())
   // A rate limit that talks about a request/token window is NOT a budget problem,
   // even though LiteLLM puts "limit" in the wording.
-  if (['requests', 'tokens', 'max_parallel_requests'].includes(info.limitType) && !isBudget) isBudget = false
+  if (['requests', 'tokens', 'max_parallel_requests'].includes(info.limitType)) isBudget = false
+  // Only a status that can actually carry a budget verdict may disable an
+  // endpoint for the whole quota window; a stray word in an ordinary 400 must not.
+  isBudget = isBudget && (!hasStatus || info.httpStatus === 400 || info.httpStatus === 402 || info.httpStatus === 429)
   info.isBudget = isBudget
 
-  if (info.httpStatus === 401 || info.httpStatus === 403 || (info.httpStatus === undefined && AUTH_RE.test(text))) {
+  // Order matters: an explicit HTTP status is authoritative. Text heuristics run
+  // only when the failure carried no status, so a 400 whose body happens to say
+  // "connection" is still a bad request (no failover) rather than a transport
+  // error that would rotate through every key.
+  if (info.httpStatus === 401 || info.httpStatus === 403 || (!hasStatus && AUTH_RE.test(text))) {
     info.kind = ErrorKind.AUTH
-  } else if (isBudget || info.httpStatus === 402 || info.httpStatus === 409) {
+  } else if (isBudget || info.httpStatus === 402) {
     info.kind = ErrorKind.QUOTA_EXHAUSTED
-  } else if (info.httpStatus === 429 || /ratelimit|throttl/i.test(typeMatch?.[1] ?? '')) {
+  } else if (info.httpStatus === 429 || /ratelimit|throttl/i.test(errorType ?? '')) {
     info.kind = ErrorKind.RATE_LIMIT
-  } else if (info.httpStatus === 408 || info.httpStatus === 504 || (info.httpStatus === undefined && TIMEOUT_RE.test(text))) {
+  } else if (info.httpStatus === 408 || info.httpStatus === 504) {
     info.kind = ErrorKind.TIMEOUT
-  } else if (info.httpStatus === undefined || CONNECTION_RE.test(text)) {
-    info.kind = ErrorKind.CONNECTION
-  } else if (info.httpStatus >= 500) {
+  } else if (hasStatus && info.httpStatus >= 500) {
     info.kind = ErrorKind.SERVER
-  } else if (info.httpStatus >= 400) {
+  } else if (hasStatus && info.httpStatus >= 400) {
     info.kind = ErrorKind.BAD_REQUEST
-  } else if (['rate_limit_error', 'throttling_error'].includes(errorType ?? '')) {
+  } else if (!hasStatus && TIMEOUT_RE.test(text)) {
+    info.kind = ErrorKind.TIMEOUT
+  } else if (!hasStatus && CONNECTION_RE.test(text)) {
+    info.kind = ErrorKind.CONNECTION
+  } else if (!hasStatus && /ratelimit|throttl/i.test(errorType ?? '')) {
     info.kind = ErrorKind.RATE_LIMIT
+  } else {
+    info.kind = ErrorKind.UNKNOWN
   }
   return info
 }

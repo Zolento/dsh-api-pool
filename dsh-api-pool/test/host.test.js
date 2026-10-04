@@ -23,7 +23,12 @@ function fakeContext() {
   const ctx = {
     logger: { info() {}, warn() {}, error() {} },
     get(name) {
-      if (name === 'settings') return { mutate: async (ns, ops) => { mutations.push({ ns, ops }) } }
+      if (name === 'settings') {
+        // A disposal-time lookup can legitimately return nothing once the
+        // registry is torn down; the plugin must have captured it earlier.
+        if (ctx.settingsGone === true) return undefined
+        return { mutate: async (ns, ops) => { mutations.push({ ns, ops }) } }
+      }
       if (name === 'credentials') {
         return {
           resolve: async ref => credentials.has(ref) ? { value: credentials.get(ref) } : undefined,
@@ -119,4 +124,18 @@ test('disposal withdraws the provider profile and stops the relay this process o
     { op: 'unset', path: ['providers', 'deepseek-pool'] },
   )
   await assert.rejects(() => fetch(`http://127.0.0.1:${RELAY_PORT}/healthz`, { signal: AbortSignal.timeout(500) }))
+})
+
+test('disposal withdraws the profile even after the settings registry is gone', async (t) => {
+  withHome(t)
+  const { ctx, mutations, disposers } = fakeContext()
+  apply(ctx, Config({ endpoints: [{ name: 'primary', baseURL: 'https://primary.example/v1', apiKeyEnv: 'K' }] }))
+
+  assert.equal(await waitFor(() => mutations.some(entry => entry.ops[0]?.op === 'set')), true)
+  // Simulate teardown ordering: the settings service is no longer resolvable.
+  ctx.settingsGone = true
+  for (const dispose of disposers) await dispose()
+
+  const unset = mutations.find(entry => entry.ops[0]?.op === 'unset')
+  assert.deepEqual(unset?.ops[0], { op: 'unset', path: ['providers', 'deepseek-pool'] })
 })

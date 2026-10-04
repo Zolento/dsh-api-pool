@@ -1,6 +1,6 @@
 {
   "name": "dsh-api-pool",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "description": "Multi-endpoint, quota-aware API pool for DeepSeek Harness: a selectable 'API Pool' provider with automatic key/endpoint failover and a settings page that manages the endpoints.",
   "type": "module",

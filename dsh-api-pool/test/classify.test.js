@@ -63,3 +63,29 @@ test('parseTimestamp normalizes UTC suffix and space separator', () => {
   assert.equal(parseTimestamp('2026-10-03 18:10:19 UTC'), Date.parse('2026-10-03T18:10:19Z'))
   assert.equal(parseTimestamp('2026-10-03T18:10:19Z'), Date.parse('2026-10-03T18:10:19Z'))
 })
+
+test('an explicit status outranks matching words in the body', () => {
+  // A malformed-request 400 that mentions "connection" must stay a bad request:
+  // rotating keys cannot fix it, and the old order made it a transport failure.
+  assert.equal(classifyError({ status: 400, body: JSON.stringify({ error: { message: 'invalid connection string' } }) }).kind, ErrorKind.BAD_REQUEST)
+  // A 5xx that mentions "network" is a server failure, not a transport one.
+  assert.equal(classifyError({ status: 503, body: 'upstream network error' }).kind, ErrorKind.SERVER)
+  // 409 is a conflict, not an exhausted budget (which would bench the endpoint).
+  assert.equal(classifyError({ status: 409, body: 'conflict' }).kind, ErrorKind.BAD_REQUEST)
+  // A bare "billing"/"quota" word in an ordinary 400 must not trip the budget path.
+  assert.equal(classifyError({ status: 400, body: JSON.stringify({ error: { message: 'invalid billing profile' } }) }).kind, ErrorKind.BAD_REQUEST)
+  assert.equal(classifyError({ status: 400, body: JSON.stringify({ error: { message: 'quota field is required' } }) }).isBudget, false)
+})
+
+test('budget wording still binds on the statuses that can carry it', () => {
+  const budget = JSON.stringify({ error: { message: 'ExceededBudget: Key over 3h budget. Spend=$30.12, Limit=$30.00', type: 'budget_exceeded' } })
+  assert.equal(classifyError({ status: 429, body: budget }).kind, ErrorKind.QUOTA_EXHAUSTED)
+  assert.equal(classifyError({ status: 402, body: budget }).kind, ErrorKind.QUOTA_EXHAUSTED)
+  assert.equal(classifyError({ status: 400, body: budget }).kind, ErrorKind.QUOTA_EXHAUSTED)
+})
+
+test('transport failures without a status classify from their wording', () => {
+  assert.equal(classifyTransportError(new Error('terminated')).kind, ErrorKind.CONNECTION)
+  assert.equal(classifyTransportError(new Error('other side closed')).kind, ErrorKind.CONNECTION)
+  assert.equal(classifyTransportError(new Error('something inexplicable')).kind, ErrorKind.UNKNOWN)
+})
