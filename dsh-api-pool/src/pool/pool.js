@@ -11,7 +11,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { classifyTransportError, summaryOf } from './kinds.js'
-import { emptyState, endpointState, onFailure, onSuccess, recordRequest, applyRecovery, recentRequests, timeUntilAvailable, availabilityOf, totalSpendOf, endpointSpendOf, recordUsage } from './state.js'
+import { emptyState, endpointState, onFailure, onSuccess, recordRequest, applyRecovery, recentRequests, timeUntilAvailable, availabilityOf, totalDaySpendOf, daySpendOf, rollOverDays, recordUsage } from './state.js'
 import { selectEndpoint } from './select.js'
 import { refreshQuotas } from './quota.js'
 
@@ -127,12 +127,13 @@ export class ApiPool {
    * @param {() => number} [options.now] injectable clock (tests).
    * @param {(ms: number) => Promise<void>} [options.sleep] injectable sleep (tests).
    */
-  constructor({ config, state, store, events, resolveKey, now = () => Date.now(), sleep = delay }) {
+  constructor({ config, state, store, events, resolveKey, rollover, now = () => Date.now(), sleep = delay }) {
     this.config = config
     this.state = state ?? emptyState()
     this.store = store
     this.events = events
     this.resolveKey = resolveKey
+    this.rollover = rollover
     this.now = now
     this.sleep = sleep
     this.saveTimer = undefined
@@ -229,8 +230,8 @@ export class ApiPool {
         rpmLimit: entry.rpmLimit ?? spec.rpmLimit,
         spend: entry.spend,
         maxBudget: entry.maxBudget,
-        /** Cumulative spend (banked windows + current window max) and exact tokens. */
-        totalSpend: endpointSpendOf(entry),
+        /** Today's maximum binding spend (reset at the daily rollover) and exact tokens. */
+        totalSpend: daySpendOf(entry),
         totalTokensIn: Number.isFinite(entry.totalTokensIn) ? entry.totalTokensIn : 0,
         totalTokensOut: Number.isFinite(entry.totalTokensOut) ? entry.totalTokensOut : 0,
         lastError: entry.lastError,
@@ -243,17 +244,35 @@ export class ApiPool {
   }
 
   /**
-   * Whole-pool cumulative spend since this pool first counted it. Never resets
-   * with a budget window and survives an endpoint being removed from the config.
-   * @returns {{ spendUsd: number, since: number|undefined }}
+   * Whole-pool figures: today's accumulated maximum (`cum`) plus the totals of
+   * every day already banked in the rollover record.
+   * @returns {{ spendUsd: number, bankedUsd: number, bankedDays: number, dayKey: string|undefined, since: number|undefined, tokensIn: number, tokensOut: number }}
    */
   totals() {
+    const banked = this.rollover?.totals() ?? { spendUsd: 0, days: 0 }
     return {
-      spendUsd: totalSpendOf(this.state),
+      spendUsd: totalDaySpendOf(this.state),
+      bankedUsd: banked.spendUsd,
+      bankedDays: banked.days,
+      dayKey: this.state.dayKey,
+      since: this.state.spendSince,
       tokensIn: Number.isFinite(this.state.totalTokensIn) ? this.state.totalTokensIn : 0,
       tokensOut: Number.isFinite(this.state.totalTokensOut) ? this.state.totalTokensOut : 0,
-      since: this.state.spendSince,
     }
+  }
+
+  /**
+   * Bank the previous local day if the date has changed, then persist.
+   *
+   * The `/api-pool` command calls this so the rollover is checked whenever the
+   * user looks; observations call it too, so a day is still banked even if the
+   * command is never run. The rollover record makes repeats harmless.
+   * @returns {{rolled: string|undefined, amount: number, alreadyRecorded: boolean}}
+   */
+  rolloverNow() {
+    const result = rollOverDays(this.state, this.rollover, this.now())
+    if (result.rolled !== undefined) this.flush()
+    return result
   }
 
   /**
@@ -395,7 +414,7 @@ export class ApiPool {
       const callStarted = this.now()
       try {
         const result = await attempt(spec, apiKey, { signal, attempt: attempts + 1 })
-        onSuccess(this.state, spec, this.now(), this.now() - callStarted, result?.headers)
+        onSuccess(this.state, spec, this.now(), this.now() - callStarted, result?.headers, this.rollover)
         this.events?.emit('success', { endpoint: spec.name, latency_ms: entry.lastLatencyMs })
         this.persist()
         return result
