@@ -59,6 +59,16 @@ const QUOTA_HINT_FIELDS = Object.freeze([
   'spend', 'maxBudget', 'budgetDuration', 'budgetResetAt', 'quotaSource', 'quotaCheckedAt',
 ])
 
+/**
+ * Fields left behind by the removed cumulative-spend feature. A state file
+ * written by an older build would otherwise keep them forever, so they are
+ * dropped on load and never written again.
+ */
+const REMOVED_FIELDS = Object.freeze([
+  'dayKey', 'spendSince', 'totalTokensIn', 'totalTokensOut', 'bankedSpend',
+  'windowMaxSpend', 'windowResetKey', 'lastKeySpend', 'totalSpend',
+])
+
 /** Persist pool state next to the plugin; writes are atomic and lock-free. */
 export class StateStore {
   constructor(file) {
@@ -84,7 +94,10 @@ export class StateStore {
     for (const entry of Object.values(state.endpoints)) {
       if (typeof entry !== 'object' || entry === null) continue
       for (const field of QUOTA_HINT_FIELDS) delete entry[field]
+      for (const field of REMOVED_FIELDS) delete entry[field]
     }
+    // Same for the root-level leftovers of that removed feature.
+    for (const field of REMOVED_FIELDS) delete state[field]
     return state
   }
 

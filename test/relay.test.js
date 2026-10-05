@@ -179,12 +179,15 @@ test('an upstream that dies mid-body does not crash the relay process', async ()
   }
 })
 
-test('healthz reports cumulative spend with a zero fallback', async () => {
+test('healthz reports the endpoint snapshot and no spend accounting', async () => {
   const { relay, close } = await makeRelay([])
   try {
     const health = await (await fetch(`${relay.url}/healthz`)).json()
     assert.equal(health.ok, true)
+    assert.equal(health.provider, 'dsh-api-pool')
     assert.deepEqual(health.endpoints, [])
+    assert.deepEqual(Object.keys(health).sort(), ['endpoints', 'ok', 'provider'],
+      'the removed spend fields must not reappear')
   } finally {
     await close()
   }

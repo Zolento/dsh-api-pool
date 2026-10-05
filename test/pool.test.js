@@ -179,15 +179,27 @@ test('loading state drops stale quota hints but keeps counters and cooldowns', (
   const file = join(dir, 'state.json')
   writeFileSync(file, JSON.stringify({
     version: 1,
+    dayKey: '2026-10-04',
+    spendSince: 123,
+    totalTokensIn: 10,
+    totalTokensOut: 5,
+    bankedSpend: 99,
     endpoints: {
       a: {
         spend: 1282.93, maxBudget: 100, quotaSource: 'user', budgetResetAt: 1730000000000, quotaCheckedAt: 1730000000000,
         cooldownUntil: 9999999999999, successes: 3,
+        windowMaxSpend: 12, bankedSpend: 34, windowResetKey: 1730000000000, lastKeySpend: 5, totalSpend: 46, totalTokensIn: 1,
       },
     },
   }))
 
   const state = new StateStore(file).load()
+  for (const field of ['dayKey', 'spendSince', 'totalTokensIn', 'totalTokensOut', 'bankedSpend']) {
+    assert.equal(field in state, false, `the removed feature's root field ${field} must be dropped`)
+  }
+  for (const field of ['windowMaxSpend', 'bankedSpend', 'windowResetKey', 'lastKeySpend', 'totalSpend', 'totalTokensIn']) {
+    assert.equal(field in state.endpoints.a, false, `the removed feature's endpoint field ${field} must be dropped`)
+  }
   assert.equal(state.endpoints.a.spend, undefined, 'a fetched quota hint must not be trusted across runs')
   assert.equal(state.endpoints.a.maxBudget, undefined)
   assert.equal(state.endpoints.a.quotaSource, undefined)
