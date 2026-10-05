@@ -5,9 +5,8 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ErrorKind } from '../src/pool/kinds.js'
-import { onFailure, endpointState, observeDaySpend } from '../src/pool/state.js'
+import { onFailure, endpointState } from '../src/pool/state.js'
 import { onSuccess } from '../src/pool/state.js'
-import { RolloverLog } from '../src/pool/rollover.js'
 
 function poolConfig(endpoints, extra = {}) {
   return {
@@ -175,77 +174,25 @@ test('availability lists permanently disabled endpoints', () => {
   assert.equal(row.availableInMs, Infinity)
 })
 
-test('status and totals report today\'s figures plus what has been banked', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-api-pool-rollover-'))
-  const rollover = new RolloverLog(join(dir, 'rollovers.json'))
-  const day4 = new Date(2026, 9, 4, 20, 0).getTime()
-  const day5 = new Date(2026, 9, 5, 0, 5).getTime()
-  let nowValue = day4
-
-  const pool = new ApiPool({
-    config: poolConfig(['a', 'b']),
-    resolveKey: async () => 'key',
-    rollover,
-    now: () => nowValue,
-  })
-  assert.deepEqual(
-    { spendUsd: pool.totals().spendUsd, bankedUsd: pool.totals().bankedUsd, bankedDays: pool.totals().bankedDays, dayKey: pool.totals().dayKey },
-    { spendUsd: 0, bankedUsd: 0, bankedDays: 0, dayKey: undefined },
-    'unknown figures report 0, never undefined',
-  )
-  assert.deepEqual(pool.status().map(row => [row.totalSpend, row.totalTokensIn, row.totalTokensOut]), [[0, 0, 0], [0, 0, 0]])
-
-  const entryA = endpointState(pool.state, 'a')
-  observeDaySpend(pool.state, entryA, 40, day4, rollover)
-  observeDaySpend(pool.state, entryA, 62, day4, rollover)
-  pool.recordUsage('b', { inputTokens: 1_000, outputTokens: 500 })
-
-  const rows = pool.status()
-  assert.equal(rows[0].totalSpend, 62, 'today max so far')
-  assert.equal(rows[1].totalSpend, 0)
-  assert.equal(rows[1].totalTokensIn, 1_000)
-
-  // Midnight passes; the next check banks 2026-10-04 and the day counters restart.
-  nowValue = day5
-  const banked = pool.rolloverNow()
-  assert.deepEqual({ rolled: banked.rolled, amount: banked.amount }, { rolled: '2026-10-04', amount: 62 })
-  assert.equal(rollover.has('2026-10-04'), true)
-  assert.equal(pool.totals().bankedUsd, 62)
-  assert.equal(pool.totals().bankedDays, 1)
-  assert.equal(pool.totals().spendUsd, 0, 'cum restarts for the new day')
-  assert.equal(pool.status()[0].totalSpend, 0)
-
-  // Re-running the check must not bank the same day twice.
-  const again = pool.rolloverNow()
-  assert.deepEqual({ rolled: again.rolled, alreadyRecorded: again.alreadyRecorded }, { rolled: undefined, alreadyRecorded: false })
-  assert.equal(pool.totals().bankedUsd, 62)
-  assert.equal(pool.totals().bankedDays, 1)
-})
-
 test('loading state drops stale quota hints but keeps counters and cooldowns', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-api-pool-state-'))
   const file = join(dir, 'state.json')
   writeFileSync(file, JSON.stringify({
     version: 1,
-    totalSpend: 1.5,
-    spendSince: 123,
     endpoints: {
       a: {
         spend: 1282.93, maxBudget: 100, quotaSource: 'user', budgetResetAt: 1730000000000, quotaCheckedAt: 1730000000000,
-        cooldownUntil: 9999999999999, totalSpend: 0.5, successes: 3,
+        cooldownUntil: 9999999999999, successes: 3,
       },
     },
   }))
 
   const state = new StateStore(file).load()
-  assert.equal(state.totalSpend, 1.5, 'cumulative spend is ours and must survive')
-  assert.equal(state.spendSince, 123)
   assert.equal(state.endpoints.a.spend, undefined, 'a fetched quota hint must not be trusted across runs')
   assert.equal(state.endpoints.a.maxBudget, undefined)
   assert.equal(state.endpoints.a.quotaSource, undefined)
   assert.equal(state.endpoints.a.quotaCheckedAt, undefined)
   assert.equal(state.endpoints.a.cooldownUntil, 9999999999999, 'a cooldown carries its own expiry, so keep it')
-  assert.equal(state.endpoints.a.totalSpend, 0.5)
   assert.equal(state.endpoints.a.successes, 3)
 })
 

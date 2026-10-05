@@ -13,7 +13,7 @@
  */
 
 import { parseTimestamp } from './kinds.js'
-import { endpointState, observeDaySpend } from './state.js'
+import { endpointState } from './state.js'
 
 /** Strip `/v1` and any trailing slash to reach the service root. */
 export function rootURL(baseURL) {
@@ -120,9 +120,6 @@ export async function refreshQuotas(specs, state, resolveKey, config, now = Date
     for (const [key, value] of Object.entries(result.discovered)) {
       if (value !== undefined && value !== null) entry[key] = value
     }
-    // Fold the fresh binding spend into today's maximum (observeDaySpend also
-    // banks the previous day when the local date has moved on).
-    observeDaySpend(state, entry, entry.spend, now, config.rollover)
     config.onEvent?.('quota_refresh', {
       endpoint: result.spec.name,
       spend: entry.spend,
