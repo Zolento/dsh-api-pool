@@ -118,68 +118,27 @@ DSH 只把 **Host 设置**开放给从 `127.0.0.1` / `localhost` 打开的页面
 
 ```
 dsh-api-pool — 4 endpoint(s), strategy=least_loaded
-  primary    ready          rpm=0/20  window=$40.79/$100  cum=$12.345678  last=rate_limit
-  secondary  quota( 89%)    rpm=0/20  window=$89.26/$100  cum=$3.210000
-  tertiary  ready          rpm=0/20  window=$32.16/$100  cum=$0.987654
-  spare  ready          rpm=0/20  window=$0.00/$100   cum=$0.000000
+  primary    ready          rpm=0/20  window=$40.79/$100  last=rate_limit
+  secondary  quota( 89%)    rpm=0/20  window=$89.26/$100
+  tertiary   ready          rpm=0/20  window=$32.16/$100
+  spare      ready          rpm=0/20  window=$0.00/$100
   capacity: 3/4 ready now
-  cumulative spend: $17.531332 since 2026-10-04T13:00:00.000Z
   next recovery: secondary in 4h30m (quota)
   relay: http://127.0.0.1:8765/v1 (owned by this process)
 ```
 
 - `window=` 是**当前预算窗口**的消费/上限（来自 `/key/info` 或 `/user/info`，随
-  `budget_reset_at` 清零）；
-- `cum=` 是**今天**的累计：每天本地 0 点把前一天结转进记录文件并清零（详见下一节）。
-  当天数值随 `state.json` 持久化，历史天数记在 `rollovers.json` 里；
+  `budget_reset_at` 清零）。注意它是 **key 或账号级别**的：同一凭据被其他客户端使用时也会计入；
 - 每个端点后缀 `last=` 是最近一次失败分类；`quota(NN%)` 表示探测到预算已用比例；
 - `capacity` 是当前可直接使用的端点数；只要有端点处于冷却/配额禁用，就给出
   `next recovery`（**卡在哪个端点、还有多久**）——这正是「全端点不可用」时请求在等的东西；
 - 全不可用时改成 `blocked: no endpoint available — waiting for <名字> to recover in <时间> (<原因>, last=<错误>)`；
 - 永久禁用（401/403）的端点单独列出 `permanently disabled: ...` 并提示修凭据。
-- `GET /healthz` 也带 `totalSpend` / `bankedSpend` / `bankedDays` / `dayKey` / `spendSince`
-  与每个端点的精确 token 计数。
+- `GET /healthz` 返回同样的端点快照，便于外部脚本读取。
 
-### `cum=` 是怎么来的（按自然日结转）
-
-`cum` 用的是**代理自己的每日预算窗口消费**，不是我们按 token 估的价：
-
-1. `dayKey` 始终等于**当天**的本地日期；当天记录该端点**观察到的最大 window spend**
-   （窗口内消费只增，取最大值即可）；
-2. 本地跨过 0 点后的第一次检查（运行 `/api-pool`，或任意一次配额探测/成功调用）会把
-   **前一天**的数值结转进记录文件、把当天计数清零，`dayKey` 变为新的一天；
-   也就是 **5 号 00:00 结转 4 号**；
-3. 端点 `cum` = 今天的最大值（0 点清零），池级 `cum` = 今天各端点最大值之和。
-
-**结转记录文件**：`~/.dsh/api-pool/rollovers.json`
-
-```json
-{
-  "version": 1,
-  "days": {
-    "2026-10-04": {
-      "usd": 195.1982,
-      "endpoints": { "primary": 46.47, "secondary": 92.66 },
-      "rolledAt": "2026-10-05T00:03:11.000Z"
-    }
-  }
-}
-```
-
-它记录**哪些日期已经结转**（当天金额、每端点金额、结转时间），是「是否需要结转」的唯一权威：
-重启、同时跑两个实例、或反复运行检查都不会把同一天记两次（已存在的日期只清零计数、不重复计账）。
-**启动时不做任何累计。**
-
-> **⚠️ 这个特性有前提，`cum` 仅供参考：**
-> - 只有当 API 的预算窗口**按同一自然日节奏刷新**时才成立（本项目验证的几个 key 在本地 0 点
->   刷新）。API 若不重置窗口，消费会一直涨（等价于 lifetime）；若重置比我们观察更频繁，
->   则可能少计。
-> - 窗口消费是 **key 或账号级别**的：同一凭据被其他客户端使用时会计入；两个端点若绑定到
->   同一个账号级预算，会各自记一份（池级总计会重复计算这部分）。
-> - 它**不是账单**，只用于大致判断「今天/这些天消耗了多少」，精确对账请以服务商账单为准。
->
-> 代码里的同一份说明见 `src/pool/state.js` 的 `observeDaySpend` / `rollOverDays`
-> 与 `src/pool/rollover.js`。
+> 本插件**不统计消费金额**：实测流式响应不返回单次成本（`x-litellm-response-cost` 为 `null`），
+> 而 `x-litellm-key-spend` 是跨客户端共享、批量结转的，都不能用来算「这个池花了多少」。
+> 需要金额请直接看服务商后台。
 
 ## 配置参考
 
@@ -190,7 +149,6 @@ dsh-api-pool — 4 endpoint(s), strategy=least_loaded
 | `enabled` | `true` | 池总开关（关闭时中继返回 503） |
 | `strategy` | `least_loaded` | `least_loaded` \| `priority` \| `round_robin` |
 | `models` | `['deepseek-flash']` | provider 暴露的模型列表（逗号分隔编辑） |
-| `streamUsage` | `true` | 转发时注入 `stream_options.include_usage`，让流式响应也返回精确 token 用量（仅用于 `/healthz` 的计数） |
 | `api` | `openai-completions` | provider profile 的协议 |
 | `reasoning` | `high` | provider profile 的默认思考强度 |
 | `thinkingFormat` | `deepseek` | provider profile 的 `compat.thinkingFormat` |
@@ -265,8 +223,7 @@ dsh-api-pool — 4 endpoint(s), strategy=least_loaded
 | --- | --- |
 | `~/.dsh/api-pool/api-pool.log` | 人类可读：`[FAILOVER] endpoint=... kind=... cooldown-seconds=...` |
 | `~/.dsh/api-pool/api-pool-events.jsonl` | 机器可读（`failover` / `all_endpoints_busy` / `quota_refresh` / `relay_error` / `success`） |
-| `~/.dsh/api-pool/state.json` | 端点健康 / 冷却 / RPM 窗口 / 今日 cum / token 计数 |
-| `~/.dsh/api-pool/rollovers.json` | 已结转的日期与金额（每日累计的权威记录） |
+| `~/.dsh/api-pool/state.json` | 端点健康 / 冷却 / RPM 窗口 / 配额快照 |
 | `~/.dsh/api-pool/relay-token` | 中继共享令牌（0600） |
 
 状态文件由原子重命名写入，并用锁目录在进程间做尽力互斥。

@@ -20,7 +20,6 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { Config, plainConfig, resolvePoolConfig } from './config.js'
 import { ApiPool, StateStore } from './pool/pool.js'
-import { RolloverLog } from './pool/rollover.js'
 import { EventLog } from './pool/events.js'
 import { Relay } from './relay.js'
 import { buildProviderProfile, ensureProviderProfile, jsonEqual, removeProviderProfile, storedProfile } from './provider.js'
@@ -83,15 +82,6 @@ function formatDuration(ms) {
 }
 
 /**
- * Format a USD amount for status output. Anything missing or non-finite counts
- * as 0, so a deployment that reports no cost still renders cleanly.
- */
-function usd(value) {
-  const amount = Number.isFinite(value) && value > 0 ? value : 0
-  return amount >= 0.01 ? amount.toFixed(4) : amount.toFixed(6)
-}
-
-/**
  * Whether another dsh-api-pool process already serves the fixed relay port.
  * Two instances of the harness (web plus headless) share one provider profile,
  * so the first one to start owns the relay and the others reuse it.
@@ -129,9 +119,6 @@ export function apply(ctx, config) {
     logSuccesses: plainConfig(config).logSuccesses === true,
   })
   const store = new StateStore(join(dir, 'state.json'))
-  // Durable record of banked days: the authority on what a daily rollover has
-  // already booked, so a restart or a second process cannot double-count.
-  const rollover = new RolloverLog(join(dir, 'rollovers.json'))
   // Captured at apply time: re-resolving it during disposal can return
   // undefined once the registry is torn down, which would silently leave the
   // published provider profile behind in the user's settings document.
@@ -251,7 +238,6 @@ export function apply(ctx, config) {
       store,
       events,
       resolveKey,
-      rollover,
     })
 
     // Probe once at startup, past the throttle: persisted quota may have been
@@ -276,10 +262,10 @@ export function apply(ctx, config) {
       if (await relayAlreadyServing(token)) {
         // Another harness process owns the relay; this one shares its state
         // through the same settings document and does not fight for the port.
-        runtime.relay = new Relay({ pool: runtime.pool, token, basePath: BASE_PATH, models, logger: ctx.logger, streamUsage: runtime.config.streamUsage })
+        runtime.relay = new Relay({ pool: runtime.pool, token, basePath: BASE_PATH, models, logger: ctx.logger })
         ctx.logger.info(`api-pool: reusing the relay already listening on http://127.0.0.1:${RELAY_PORT}${BASE_PATH}`)
       } else {
-        const relay = new Relay({ pool: runtime.pool, token, basePath: BASE_PATH, models, logger: ctx.logger, streamUsage: runtime.config.streamUsage })
+        const relay = new Relay({ pool: runtime.pool, token, basePath: BASE_PATH, models, logger: ctx.logger })
         try {
           await relay.listen(RELAY_PORT)
           runtime.relay = relay
@@ -359,26 +345,16 @@ export function apply(ctx, config) {
       handler: () => {
         const pool = runtime.pool
         if (pool === undefined) return { kind: 'success', text: 'api-pool: still starting' }
-        // Bank the previous local day if midnight has passed since we last
-        // counted; the rollover record makes a repeat harmless.
-        const rolloverResult = pool.rolloverNow()
-        if (rolloverResult.rolled !== undefined) {
-          ctx.logger.info(`api-pool: banked ${rolloverResult.rolled} — $${rolloverResult.amount.toFixed(4)}`
-            + `${rolloverResult.alreadyRecorded ? ' (already recorded; counter reset only)' : ''}`)
-        }
         const lines = [`dsh-api-pool — ${pool.specs.length} endpoint(s), strategy=${pool.config.strategy}`]
         for (const row of pool.status()) {
           const window = Number.isFinite(row.spend) && Number.isFinite(row.maxBudget) && row.maxBudget > 0
             ? ` window=$${row.spend.toFixed(2)}/$${row.maxBudget}`
             : ''
           const rpm = row.rpmLimit === undefined ? `${row.recent}` : `${row.recent}/${row.rpmLimit}`
-          const cumulative = ` cum=$${usd(row.totalSpend)}`
-          lines.push(`  ${row.name}  ${row.state}  rpm=${rpm}${window}${cumulative}${row.lastErrorKind === undefined ? '' : `  last=${row.lastErrorKind}`}`)
+          lines.push(`  ${row.name}  ${row.state}  rpm=${rpm}${window}${row.lastErrorKind === undefined ? '' : `  last=${row.lastErrorKind}`}`)
         }
         const capacity = pool.availability()
         lines.push(`  capacity: ${capacity.ready}/${capacity.enabled} ready now`)
-        const totals = pool.totals()
-        lines.push(`  cumulative spend: $${usd(totals.spendUsd)}${totals.since === undefined ? '' : ` since ${new Date(totals.since).toISOString()}`}`)
         if (capacity.blocked) {
           lines.push(capacity.next === undefined
             ? '  blocked: every endpoint is permanently disabled (fix the credential or re-enable the endpoint)'

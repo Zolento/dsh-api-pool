@@ -40,8 +40,6 @@ export const Config = z.object({
   maxTokens: z.number().step(1).min(1).default(65_536).volatile(),
 
   endpoints: z.array(endpointSchema).default([]).volatile(),
-  /** Inject `stream_options.include_usage` so streamed usage (and accounting) is reported. */
-  streamUsage: z.boolean().default(true).volatile(),
 
 
   // Pool tuning (milliseconds).
@@ -139,7 +137,6 @@ export function resolvePoolConfig(plain, extras = {}) {
     cooldowns,
     endpoints: normalizeEndpoints(plain.endpoints),
     models: normalizeModels(plain.models),
-    streamUsage: plain.streamUsage !== false,
     ...extras,
   }
 }

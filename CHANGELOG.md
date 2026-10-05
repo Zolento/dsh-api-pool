@@ -4,6 +4,27 @@
 每次发版都打一个形如 `v<插件版本>-dsh<DSH版本>` 的 tag，例如
 `v0.1.0-dsh0.2.0-rc.2`；DSH 升级后若尚未重新验证，不要沿用旧 tag。
 
+## v0.1.11 — dsh0.2.0-rc.2（2026-10-04）
+
+**移除累计消费（cum）功能。** 实测这个部署上没有任何可信的金额来源：
+
+- 流式响应**不返回** `x-litellm-response-cost`（值为 `null`）；需要显式请求
+  `stream_options.include_usage` 才有 token 用量。
+- `x-litellm-key-spend` 是**跨客户端共享、批量结转**的（连续 3 次调用该值纹丝不动），
+  它的增量与我们的请求无关，不能当自己的账。
+- 用 token × 自配价格只是「按猜测的单价换算」，同样不可靠。
+
+因此：
+
+- `/api-pool` 不再显示 `cum=` 与 `cumulative spend:`，`/healthz` 不再返回消费字段；
+- 删除日累计/结转逻辑与 `~/.dsh/api-pool/rollovers.json`（含 `RolloverLog`、
+  `observeDaySpend`/`rollOverDays`、`dayKey`/`dayMaxSpend`）、token 计数与
+  `stream_options.include_usage` 注入、`streamUsage` 配置项；
+- `state.json` 里旧的累计字段不再写入也不读取；代理的 `window=`（预算窗口消费/上限）
+  仍然显示，README 里补回它的口径说明（key/账号级，含其他客户端用量）；
+- 其余功能不变：故障切换、冷却状态机、配额探测、`capacity` / `next recovery` /
+  `blocked` / 永久禁用提示。
+
 ## v0.1.10 — dsh0.2.0-rc.2（2026-10-04）
 
 `cum` 改为**按自然日结转**（此前是「窗口回落即结转」，且重启也会参与，语义不清）：

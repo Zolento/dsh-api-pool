@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { emptyState, endpointState, onFailure, onSuccess, recordRequest, isUnavailable, timeUntilAvailable, availabilityOf, quotaFromHeaders, quotaExhausted, totalDaySpendOf, daySpendOf, observeDaySpend, recordUsage } from '../src/pool/state.js'
+import { emptyState, endpointState, onFailure, onSuccess, recordRequest, isUnavailable, timeUntilAvailable, availabilityOf, quotaFromHeaders, quotaExhausted } from '../src/pool/state.js'
 import { selectEndpoint } from '../src/pool/select.js'
 import { ErrorKind } from '../src/pool/kinds.js'
 
@@ -182,120 +182,23 @@ test('a probe-found 100% budget makes the endpoint unavailable without any error
   assert.equal(availabilityOf(state, target, 1000, 60_000).reason, 'quota')
 })
 
-test('successful calls accumulate per-endpoint and pool-wide counters', () => {
+
+test('a successful call clears transient penalties and keeps quota observations', () => {
   const state = emptyState()
-  assert.equal(daySpendOf(endpointState(state, 'a')), 0)
-  assert.equal(endpointState(state, 'a').totalTokensIn, 0)
-
-  onSuccess(state, spec('a'), 1000, 10, {})                        // health only
-  onSuccess(state, spec('b'), 1000, 10, {})
-  recordUsage(state, 'a', { inputTokens: 10, outputTokens: 5 })
-  assert.equal(recordUsage(state, 'a', { inputTokens: undefined, outputTokens: 'x' }), false)
-
-  assert.equal(endpointState(state, 'a').totalTokensIn, 10)
-  assert.equal(endpointState(state, 'a').totalTokensOut, 5)
-  assert.equal(state.totalTokensIn, 10)
-  assert.equal(state.totalTokensOut, 5)
-  assert.equal(state.successes, undefined, 'no accidental top-level counter')
-
-  // The pool total helpers tolerate junk rather than throwing.
-  assert.equal(totalDaySpendOf(emptyState()), 0)
-  assert.equal(totalDaySpendOf(undefined), 0)
-  assert.equal(totalDaySpendOf({ endpoints: { a: { dayMaxSpend: 'x' } } }), 0)
-})
-
-test('cum is today\'s maximum, banked and reset at the local date change', () => {
-  const state = emptyState()
+  const target = spec('a')
   const entry = endpointState(state, 'a')
-  const day4 = new Date(2026, 9, 4, 22, 55).getTime()      // local 2026-10-04 22:55
-  const day5 = new Date(2026, 9, 5, 0, 5).getTime()        // local 2026-10-05 00:05
-  const banked = []
-  const record = { record: (date, usd, endpoints) => { banked.push({ date, usd, endpoints }); return true } }
+  entry.cooldownUntil = 5_000
+  entry.disabledUntil = 5_000
+  entry.disabledReason = 'rate_limit'
+  entry.consecutiveFailures = 3
 
-  observeDaySpend(state, entry, 40, day4, record)
-  assert.equal(state.dayKey, '2026-10-04')
-  assert.equal(daySpendOf(entry), 40)
-  observeDaySpend(state, entry, 55, day4, record)          // grows during the day
-  assert.equal(daySpendOf(entry), 55)
-  assert.equal(totalDaySpendOf(state), 55)
-  assert.equal(banked.length, 0, 'nothing is banked before midnight')
+  onSuccess(state, target, 1_000, 12, { 'x-litellm-key-spend': '9.5' })
 
-  observeDaySpend(state, entry, 3, day5, record)           // first observation after midnight
-  assert.deepEqual(banked, [{ date: '2026-10-04', usd: 55, endpoints: { a: 55 } }])
-  assert.equal(state.dayKey, '2026-10-05')
-  assert.equal(daySpendOf(entry), 3, 'cum restarts for the new day')
-  assert.equal(state.spendSince, day5, 'the day counters restart too')
-})
-
-test('a rollover that the record already holds resets without counting twice', () => {
-  const state = emptyState()
-  const entry = endpointState(state, 'a')
-  const day4 = new Date(2026, 9, 4, 23, 0).getTime()
-  const day5 = new Date(2026, 9, 5, 0, 1).getTime()
-  const record = { record: () => false }                   // file already has 2026-10-04
-
-  observeDaySpend(state, entry, 42, day4, record)
-  observeDaySpend(state, entry, 1, day5, record)
-  assert.equal(state.dayKey, '2026-10-05')
-  assert.equal(daySpendOf(entry), 1, 'the counter still resets for the new day')
-})
-
-test('the provider per-response cost is never treated as our bill', () => {
-  const state = emptyState()
-  onSuccess(state, spec('a'), new Date(2026, 9, 4, 12, 0).getTime(), 5, { 'x-litellm-response-cost': '0.25' })
-  assert.equal(totalDaySpendOf(state), 0)
-  assert.equal(state.spendSince, undefined)
-})
-
-test('an observed key-scope spend feeds today\'s maximum', () => {
-  const state = emptyState()
-  const now = new Date(2026, 9, 4, 12, 0).getTime()
-  // No user-scope binding yet, so the key header is the binding figure.
-  onSuccess(state, spec('a'), now, 5, { 'x-litellm-key-spend': '9.5' })
-  assert.equal(totalDaySpendOf(state), 9.5)
-  onSuccess(state, spec('a'), now + 1000, 5, { 'x-litellm-key-spend': '9.8' })
-  assert.equal(totalDaySpendOf(state), 9.8, 'today\'s maximum, not the sum')
-})
-
-test('incomplete observations are ignored rather than corrupting the day', () => {
-  const state = emptyState()
-  const entry = endpointState(state, 'a')
-  const now = new Date(2026, 9, 4, 12, 0).getTime()
-  observeDaySpend(state, entry, Number.NaN, now)
-  observeDaySpend(state, entry, -5, now)
-  assert.equal(totalDaySpendOf(state), 0)
-  assert.equal(state.spendSince, undefined)
-})
-
-test('token counting never invents dollars', () => {
-  const state = emptyState()
-  recordUsage(state, 'a', { inputTokens: 1_000_000, outputTokens: 500_000 })
-  assert.equal(state.totalTokensIn, 1_000_000)
-  assert.equal(state.totalTokensOut, 500_000)
-  assert.equal(totalDaySpendOf(state), 0, 'dollars come from the provider spend only')
-  assert.equal(state.spendSince, undefined)
-})
-
-test('usage with malformed fields counts as 0', () => {
-  const state = emptyState()
-  assert.equal(recordUsage(state, 'a', { inputTokens: 10, outputTokens: 5 }), true)
-  assert.equal(state.totalTokensIn, 10)
-  assert.equal(recordUsage(state, 'a', { inputTokens: 'x', outputTokens: Number.NaN }), false)
-  assert.equal(state.totalTokensIn, 10)
-})
-
-test('token usage accumulates per endpoint and pool-wide, ignoring malformed input', () => {
-  const state = emptyState()
-  assert.equal(recordUsage(state, 'a', { inputTokens: 100, outputTokens: 20 }), true)
-  assert.equal(recordUsage(state, 'a', { inputTokens: 50, outputTokens: 5 }), true)
-  assert.equal(recordUsage(state, 'b', { inputTokens: undefined, outputTokens: Number.NaN }), false)
-  assert.equal(recordUsage(state, 'b', {}), false)
-  assert.equal(recordUsage(state, 'b', undefined), false)
-
-  const entry = endpointState(state, 'a')
-  assert.equal(entry.totalTokensIn, 150)
-  assert.equal(entry.totalTokensOut, 25)
-  assert.equal(state.totalTokensIn, 150)
-  assert.equal(state.totalTokensOut, 25)
-  assert.equal(endpointState(state, 'b').totalTokensIn, 0)
+  assert.equal(entry.cooldownUntil, 0)
+  assert.equal(entry.disabledUntil, 0)
+  assert.equal(entry.disabledReason, undefined)
+  assert.equal(entry.consecutiveFailures, 0)
+  assert.equal(entry.successes, 1)
+  assert.equal(entry.lastLatencyMs, 12)
+  assert.equal(entry.spend, 9.5, 'the quota observation still lands')
 })

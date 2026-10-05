@@ -25,14 +25,6 @@ export function emptyState() {
     updatedAt: 0,
     roundRobinIndex: 0,
     quotaNextRefreshAt: 0,
-    // Daily accounting. `dayKey` is the LOCAL date the current per-endpoint
-    // `dayMaxSpend` values belong to; a date rollover banks that day and resets
-    // `cum`. Completed days live in the rollover record file.
-    dayKey: undefined,
-    /** When today's counting started (first non-zero observation of the day). */
-    spendSince: undefined,
-    totalTokensIn: 0,
-    totalTokensOut: 0,
     endpoints: {},
   }
 }
@@ -54,11 +46,6 @@ export function endpointState(state, name) {
       lastErrorKind: undefined,
       lastErrorAt: undefined,
       lastLatencyMs: undefined,
-      /** Largest binding spend seen today (0 until read); reset at a date rollover. */
-      dayMaxSpend: 0,
-      /** Exact token counts (the relay asks for streamed usage). */
-      totalTokensIn: 0,
-      totalTokensOut: 0,
       spend: undefined,
       maxBudget: undefined,
       budgetDuration: undefined,
@@ -162,102 +149,8 @@ export function quotaFromHeaders(entry, headers) {
   if (hit) entry.quotaCheckedAt = Date.now()
 }
 
-/** Local calendar date (`YYYY-MM-DD`) for one instant. */
-export function localDateKey(now) {
-  const date = new Date(now)
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${date.getFullYear()}-${month}-${day}`
-}
-
-/**
- * Fold one observed binding spend into today's maximum.
- *
- * `cum` is the largest spend seen so far **today**, taken from the provider's own
- * budget-window figure (no price of ours is involved). A day is banked and `cum`
- * reset by {@link rollOverDays}, which runs on the local-midnight date change.
- *
- * LIMITATIONS, accepted in exchange for using the provider's real numbers instead
- * of a price we would have to guess:
- * - it assumes the API's budget window is refreshed on the same daily cadence
- *   (the endpoints this plugin was built for reset at local midnight); an API that
- *   never resets reports its lifetime spend, and one that resets more often than
- *   we observe can under-count;
- * - the figure is the **key's or account's** spend, so usage by other clients of
- *   the same credential is included;
- * - two endpoints bound to the same account-level budget each count it.
- * Treat `cum` as a reference figure, not as an invoice.
- */
-export function observeDaySpend(state, entry, spent, now, record) {
-  // Keep `dayKey` on the actual calendar day: past local midnight the first
-  // observation banks the previous day (once — the record file is the authority)
-  // before folding the new value in.
-  rollOverDays(state, record, now)
-  if (!Number.isFinite(spent) || spent < 0) return
-  const current = Number.isFinite(entry.dayMaxSpend) ? entry.dayMaxSpend : 0
-  entry.dayMaxSpend = Math.max(current, spent)
-  if (entry.dayMaxSpend > 0) state.spendSince ??= now
-}
-
-/** One endpoint's current-day figure. */
-export function daySpendOf(entry) {
-  return Number.isFinite(entry?.dayMaxSpend) ? entry.dayMaxSpend : 0
-}
-
-/** The whole pool's current-day figure. */
-export function totalDaySpendOf(state) {
-  let total = 0
-  for (const entry of Object.values(state?.endpoints ?? {})) total += daySpendOf(entry)
-  return total
-}
-
-/**
- * Bank the previous local day and reset today's counting.
- *
- * Runs on demand — the `/api-pool` command calls it — rather than at startup, so a
- * restart never books the same day twice. `record` is the durable list of dates
- * already banked: if the previous day is already in it, the in-memory reset still
- * happens but nothing is counted again, because the record file (not the process)
- * is the authority on what has been banked.
- *
- * @param {object} state pool state.
- * @param {{record: (date: string, usd: number, endpoints: object, now: number) => boolean}|undefined} record rollover log.
- * @param {number} now current epoch milliseconds.
- * @returns {{rolled: string|undefined, amount: number, alreadyRecorded: boolean}}
- */
-export function rollOverDays(state, record, now) {
-  const today = localDateKey(now)
-  if (state.dayKey === undefined) {
-    state.dayKey = today
-    return { rolled: undefined, amount: 0, alreadyRecorded: false }
-  }
-  if (state.dayKey === today) return { rolled: undefined, amount: 0, alreadyRecorded: false }
-
-  const date = state.dayKey
-  const amount = totalDaySpendOf(state)
-  const perEndpoint = Object.fromEntries(
-    Object.entries(state.endpoints).map(([name, entry]) => [name, daySpendOf(entry)]),
-  )
-  let alreadyRecorded = false
-  try {
-    alreadyRecorded = record?.record(date, amount, perEndpoint, now) === false
-  } catch { /* the record file is best-effort; the in-memory reset still happens */ }
-
-  for (const entry of Object.values(state.endpoints)) entry.dayMaxSpend = 0
-  state.spendSince = undefined
-  state.dayKey = today
-  return { rolled: date, amount, alreadyRecorded }
-}
-
-/**
- * A successful call clears every transient penalty.
- *
- * No cost is read here: `cum` is entirely our own accounting (see
- * {@link recordUsage}). The provider's `x-litellm-response-cost` exists only on
- * non-streaming responses, and its key-spend header is shared across clients and
- * updated in batches, so neither can be treated as this pool's bill.
- */
-export function onSuccess(state, spec, now, latencyMs, headers, record) {
+/** A successful call clears every transient penalty. */
+export function onSuccess(state, spec, now, latencyMs, headers) {
   const entry = endpointState(state, spec.name)
   entry.cooldownUntil = 0
   entry.disabledUntil = 0
@@ -266,39 +159,6 @@ export function onSuccess(state, spec, now, latencyMs, headers, record) {
   entry.successes += 1
   entry.lastLatencyMs = Math.round(latencyMs)
   if (headers !== undefined) quotaFromHeaders(entry, headers)
-  // `entry.spend` is now the binding figure (a key-scope header is only adopted
-  // when the binding budget is key-scope), so it is safe to fold into today.
-  observeDaySpend(state, entry, entry.spend, now, record)
-}
-
-/**
- * Accumulate the exact token usage of one response.
- *
- * Tokens come from the provider's own `usage` object (the relay asks for streamed
- * usage explicitly). They are an exact secondary metric; the dollar figure comes
- * from the provider's daily budget-window spend instead, because pricing every
- * token would only be as accurate as a price we had to guess.
- * Missing or malformed fields count as 0.
- *
- * @param {object} state pool state.
- * @param {string} name endpoint name.
- * @param {{inputTokens?: number, outputTokens?: number}} usage parsed usage.
- * @returns {boolean} whether anything was accumulated.
- */
-export function recordUsage(state, name, usage) {
-  const entry = endpointState(state, name)
-  const input = Number(usage?.inputTokens)
-  const output = Number(usage?.outputTokens)
-  const tokensIn = Number.isFinite(input) && input > 0 ? input : 0
-  const tokensOut = Number.isFinite(output) && output > 0 ? output : 0
-  if (tokensIn === 0 && tokensOut === 0) return false
-
-  entry.totalTokensIn = (Number.isFinite(entry.totalTokensIn) ? entry.totalTokensIn : 0) + tokensIn
-  entry.totalTokensOut = (Number.isFinite(entry.totalTokensOut) ? entry.totalTokensOut : 0) + tokensOut
-  state.totalTokensIn = (Number.isFinite(state.totalTokensIn) ? state.totalTokensIn : 0) + tokensIn
-  state.totalTokensOut = (Number.isFinite(state.totalTokensOut) ? state.totalTokensOut : 0) + tokensOut
-
-  return true
 }
 
 /**
