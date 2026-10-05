@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -16,6 +17,7 @@ function fakeContext() {
   const mutations = []
   const listeners = new Map()
   const disposers = []
+  const commands = []
   function recordEffect(fn) {
     const dispose = fn()
     if (typeof dispose === 'function') disposers.push(dispose)
@@ -39,11 +41,16 @@ function fakeContext() {
     },
     on(event, handler) { listeners.set(event, handler) },
     inject(names, callback) {
-      if (names.includes('commands')) callback({ commands: { register: () => () => {} }, effect: recordEffect })
+      if (names.includes('commands')) {
+        callback({
+          commands: { register: def => { commands.push(def); return () => {} } },
+          effect: recordEffect,
+        })
+      }
     },
     effect: recordEffect,
   }
-  return { ctx, credentials, mutations, listeners, disposers }
+  return { ctx, credentials, mutations, listeners, disposers, commands }
 }
 
 async function waitFor(predicate, timeoutMs = 5000) {
@@ -138,4 +145,41 @@ test('disposal withdraws the profile even after the settings registry is gone', 
 
   const unset = mutations.find(entry => entry.ops[0]?.op === 'unset')
   assert.deepEqual(unset?.ops[0], { op: 'unset', path: ['providers', 'deepseek-pool'] })
+})
+
+test('the /api-pool command shows endpoint health without spend accounting', async (t) => {
+  withHome(t)
+  const { ctx, disposers, commands } = fakeContext()
+  t.after(async () => { for (const dispose of disposers) await dispose() })
+  apply(ctx, Config({ endpoints: [{ name: 'primary', baseURL: 'https://primary.example/v1', apiKeyEnv: 'K' }] }))
+
+  assert.equal(await waitFor(() => commands.some(command => command.name === 'api-pool')), true, 'the command was never registered')
+  const command = commands.find(entry => entry.name === 'api-pool')
+  assert.equal(await waitFor(() => !command.handler().text.includes('still starting')), true, 'the pool never became ready')
+
+  const text = command.handler().text
+  assert.match(text, /^dsh-api-pool — 1 endpoint\(s\), strategy=least_loaded/)
+  assert.match(text, /\n  primary  /)
+  assert.match(text, /capacity: \d+\/\d+ ready now/)
+  assert.match(text, new RegExp(`relay: http://127\\.0\\.0\\.1:${RELAY_PORT}`))
+  assert.equal(text.includes('cum='), false, 'the removed cum column must not come back')
+  assert.equal(text.includes('cumulative'), false, 'the removed cumulative line must not come back')
+})
+
+test('a port held by a foreign process is reported as unavailable, not shared', async (t) => {
+  withHome(t)
+  // Occupy the relay port the way a harness instance with another token would.
+  const blocker = createServer(() => {})
+  await new Promise(resolve => blocker.listen(RELAY_PORT, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => blocker.close(() => resolve())))
+
+  const { ctx, disposers, commands } = fakeContext()
+  t.after(async () => { for (const dispose of disposers) await dispose() })
+  apply(ctx, Config({ endpoints: [{ name: 'primary', baseURL: 'https://primary.example/v1', apiKeyEnv: 'K' }] }))
+
+  assert.equal(await waitFor(() => commands.some(command => command.name === 'api-pool')), true)
+  const command = commands.find(entry => entry.name === 'api-pool')
+  assert.equal(await waitFor(() => command.handler().text.includes('unavailable')), true,
+    'a taken port must not be advertised as shared or owned')
+  assert.match(command.handler().text, /relay: http:\/\/127\.0\.0\.1:\d+\/v1 \(unavailable/)
 })

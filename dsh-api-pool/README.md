@@ -244,8 +244,10 @@ ACCEPTANCE_BOOT=1 DSH_API_POOL_LIVE=1 bash scripts/acceptance.sh   # 再发一�
 ## 已知限制
 
 - **单实例固定端口**：provider profile 指向 `127.0.0.1:8765`。第一个启动的实例拥有中继，
-  后续实例复用（通过 `/healthz` + token 判断），不会互相抢占。若 8765 被无关进程占用，
-  插件会记录错误、provider 会连接失败；改端口需要同时改 `src/index.js` 的 `RELAY_PORT`
+  后续实例复用（通过 `/healthz` + token 判断），不会互相抢占。若 8765 被无关进程或
+  **token 不相符的另一实例**占用，插件会记录错误、provider 连接会失败，并且 `/api-pool`
+  会明确显示 `relay: … (unavailable — the port is held by another process; this pool cannot serve)`
+  （既不是 owned 也不是 shared，避免误判）；改端口需要同时改 `RELAY_PORT`
   与已写入的 profile（插件下次启动会按新端口重写）。
 - **卸载残留**：`plugin remove` 不会自动删除设置文档里的 `deepseek-pool` profile，
   需手动删除该段（或在删除前先在设置里停用）。

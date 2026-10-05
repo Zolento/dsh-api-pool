@@ -132,6 +132,9 @@ export function apply(ctx, config) {
     pool: undefined,
     relay: undefined,
     ownsRelay: false,
+    // Set when REPLAY_PORT is held by a process that is not ours; the port is
+    // then neither owned nor shared, and the status surface must say so.
+    bindFailed: false,
     config: undefined,
     exposedId: undefined,
     syncing: false,
@@ -272,7 +275,11 @@ export function apply(ctx, config) {
           runtime.ownsRelay = true
           ctx.logger.info(`api-pool: relay listening on ${relay.url}${BASE_PATH} (token ${tokenFingerprint(token)})`)
         } catch (error) {
-          ctx.logger.error(`api-pool: could not bind 127.0.0.1:${RELAY_PORT}; the provider profile points there. ${String(error)}`)
+          runtime.bindFailed = true
+          ctx.logger.error(
+            `api-pool: could not bind 127.0.0.1:${RELAY_PORT} — another process holds it and does not accept this`
+            + ` instance's relay token, so this pool cannot serve requests. ${String(error)}`,
+          )
         }
       }
     } else {
@@ -368,7 +375,9 @@ export function apply(ctx, config) {
         }
         lines.push(runtime.ownsRelay
           ? `  relay: http://127.0.0.1:${RELAY_PORT}${BASE_PATH} (owned by this process)`
-          : `  relay: http://127.0.0.1:${RELAY_PORT}${BASE_PATH} (shared)`)
+          : runtime.bindFailed
+            ? `  relay: http://127.0.0.1:${RELAY_PORT}${BASE_PATH} (unavailable — the port is held by another process; this pool cannot serve)`
+            : `  relay: http://127.0.0.1:${RELAY_PORT}${BASE_PATH} (shared)`)
         return { kind: 'success', text: lines.join('\n') }
       },
     }), 'api-pool: status command')

@@ -4,6 +4,22 @@
 每次发版都打一个形如 `v<插件版本>-dsh<DSH版本>` 的 tag，例如
 `v0.1.0-dsh0.2.0-rc.2`；DSH 升级后若尚未重新验证，不要沿用旧 tag。
 
+## v0.1.12 — dsh0.2.0-rc.2（2026-10-05）
+
+复核 v0.1.11 的 cum 移除时发现并修掉两处问题：
+
+- **中继端口被异物占用时的状态显示错误**：当 8765 被另一个进程（或 token 不相符的另一实例）
+  占用、本实例绑定失败时，`/api-pool` 以前会显示 `relay: … (shared)`——其实既没拥有也没共享，
+  provider 还会连接失败。现在会显示
+  `(unavailable — the port is held by another process; this pool cannot serve)`，
+  错误日志也说明是「对方不接受本实例的 relay token」。
+- **旧 state.json 里的死字段**：被移除功能的 25 个字段（根级与端点级）会被一直带着写下去。
+  现在 `StateStore.load()` 会把它们丢弃，重启后自动清理干净（实测 25 → 0）。
+- 测试里的历史遗留：`healthz reports cumulative spend with a zero fallback` 改名并改为断言
+  `/healthz` 只有 `ok` / `provider` / `endpoints`（防止消费字段回归）。
+
+补充测试：`/api-pool` 命令输出不再出现 `cum=`/`cumulative`；端口被占用时报告 unavailable。
+
 ## v0.1.11 — dsh0.2.0-rc.2（2026-10-04）
 
 **移除累计消费（cum）功能。** 实测这个部署上没有任何可信的金额来源：
