@@ -11,7 +11,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { classifyTransportError, summaryOf } from './kinds.js'
-import { emptyState, endpointState, onFailure, onSuccess, recordRequest, applyRecovery, recentRequests, timeUntilAvailable, availabilityOf } from './state.js'
+import { emptyState, endpointState, onFailure, onSuccess, recordRequest, applyRecovery, recentRequests, timeUntilAvailable, availabilityOf, effectiveBudgetOf } from './state.js'
 import { selectEndpoint } from './select.js'
 import { refreshQuotas } from './quota.js'
 
@@ -140,12 +140,13 @@ export class ApiPool {
    * @param {() => number} [options.now] injectable clock (tests).
    * @param {(ms: number) => Promise<void>} [options.sleep] injectable sleep (tests).
    */
-  constructor({ config, state, store, events, resolveKey, now = () => Date.now(), sleep = delay }) {
+  constructor({ config, state, store, events, resolveKey, onQuotaRefresh, now = () => Date.now(), sleep = delay }) {
     this.config = config
     this.state = state ?? emptyState()
     this.store = store
     this.events = events
     this.resolveKey = resolveKey
+    this.onQuotaRefresh = onQuotaRefresh
     this.now = now
     this.sleep = sleep
     this.saveTimer = undefined
@@ -203,6 +204,11 @@ export class ApiPool {
       .finally(() => { if (this.refreshing === round) this.refreshing = undefined })
     this.refreshing = round
     await round
+    // Let the host republish the freshly observed provider budgets (the settings
+    // page needs them to validate a local limit).
+    try {
+      this.onQuotaRefresh?.()
+    } catch { /* a status publication must never break the probe */ }
   }
 
   /** Whether any endpoint has a usable budget figure yet. */
@@ -217,6 +223,9 @@ export class ApiPool {
       const entry = applyRecovery(this.state, spec, now)
       const recent = recentRequests(entry, now, this.config.rpmWindowMs).length
       const availability = availabilityOf(this.state, spec, now, this.config.quotaRecheckMs)
+      // The figure that actually governs this endpoint: the provider's budget, or
+      // the tighter local limit when one is configured.
+      const budgetCap = effectiveBudgetOf(entry, spec)
       let state = 'ready'
       if (spec.enabled === false) state = 'disabled'
       else if (entry.disabledUntil === -1) state = 'DISABLED'
@@ -226,8 +235,8 @@ export class ApiPool {
       // the state string must say so instead of claiming "ready" while the
       // selector skips the endpoint.
       else if (!availability.available && availability.reason === 'quota') {
-        const percent = Number.isFinite(entry.spend) && Number.isFinite(entry.maxBudget) && entry.maxBudget > 0
-          ? ` ${Math.min(999, Math.round((entry.spend / entry.maxBudget) * 100))}%`
+        const percent = Number.isFinite(entry.spend) && budgetCap !== undefined
+          ? ` ${Math.min(999, Math.round((entry.spend / budgetCap) * 100))}%`
           : ''
         state = `quota(${percent.trim()})`
       }
@@ -242,6 +251,7 @@ export class ApiPool {
         rpmLimit: entry.rpmLimit ?? spec.rpmLimit,
         spend: entry.spend,
         maxBudget: entry.maxBudget,
+        budgetCap,
         lastError: entry.lastError,
         lastErrorKind: entry.lastErrorKind,
         totalRequests: entry.totalRequests,

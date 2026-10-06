@@ -183,3 +183,30 @@ test('a port held by a foreign process is reported as unavailable, not shared', 
     'a taken port must not be advertised as shared or owned')
   assert.match(command.handler().text, /relay: http:\/\/127\.0\.0\.1:\d+\/v1 \(unavailable/)
 })
+
+test('the observed provider budget is published for the settings page', async (t) => {
+  withHome(t)
+  const upstream = createServer((req, res) => {
+    if (req.url.startsWith('/key/info')) {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ info: { spend: 10, max_budget: 100, rpm_limit: 20 } }))
+      return
+    }
+    res.writeHead(404, { 'content-type': 'application/json' })
+    res.end('{}')
+  })
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => upstream.close(() => resolve())))
+  const baseURL = `http://127.0.0.1:${upstream.address().port}/v1`
+
+  const { ctx, credentials, mutations, disposers } = fakeContext()
+  credentials.set('K', 'secret')
+  t.after(async () => { for (const dispose of disposers) await dispose() })
+  apply(ctx, Config({ endpoints: [{ name: 'primary', baseURL, apiKeyEnv: 'K', budgetLimit: 50 }] }))
+
+  const published = () => mutations.find(entry =>
+    entry.ns === 'dsh-api-pool' && entry.ops[0]?.path.join('.') === 'observed')
+  assert.equal(await waitFor(() => published() !== undefined), true,
+    'the settings page can never enforce the limit while the caps stay unpublished')
+  assert.deepEqual(published().ops[0].value, { primary: { maxBudget: 100 } })
+})

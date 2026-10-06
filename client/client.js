@@ -48,6 +48,12 @@ window.__ModuleLoader__.load({
         writeFailed: '写入被拒绝，请检查值是否合法。',
         advanced: '高级',
         rpmLimit: 'RPM 上限（可空）',
+        budgetLimit: '单独限额（USD）',
+        budgetLimitObserved: '获取到的上限',
+        budgetLimitUnknown: '尚未获取到上限（等待配额探测），暂不能设置单独限额',
+        budgetLimitInvalid: '请输入大于 0 的数字',
+        budgetLimitTooHigh: '必须 ≤ 获取到的上限',
+        budgetLimitStored: '当前保存的限额超过了获取到的上限，超出部分不会生效',
       },
       en: {
         nav: 'API Pool',
@@ -78,6 +84,12 @@ window.__ModuleLoader__.load({
         writeFailed: 'The write was refused; check the values.',
         advanced: 'Advanced',
         rpmLimit: 'RPM limit (optional)',
+        budgetLimit: 'Spend limit (USD)',
+        budgetLimitObserved: 'Observed budget',
+        budgetLimitUnknown: 'No budget observed yet (waiting for the quota probe); a limit cannot be set',
+        budgetLimitInvalid: 'Enter a number greater than 0',
+        budgetLimitTooHigh: 'Must be <= the observed budget',
+        budgetLimitStored: 'The saved limit exceeds the observed budget; the excess has no effect',
       },
     }
 
@@ -101,8 +113,36 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function EndpointRow({ endpoint, index, t, readOnly, onMutate }) {
+    function EndpointRow({ endpoint, index, t, readOnly, onMutate, observedMax }) {
       const setField = (key, value) => onMutate([{ op: 'set', path: ['endpoints', index, key], value }])
+      const [limitError, setLimitError] = React.useState(null)
+      const hasCap = Number.isFinite(observedMax)
+      const capHint = hasCap ? `${t('budgetLimitObserved')}：$${observedMax}` : t('budgetLimitUnknown')
+      // The rule is strict: a local limit may never exceed the budget the provider
+      // reported, so an invalid entry is reported and not written at all.
+      const updateLimit = (raw) => {
+        const text = String(raw).trim()
+        if (text === '') {
+          setLimitError(null)
+          return onMutate([{ op: 'unset', path: ['endpoints', index, 'budgetLimit'] }])
+        }
+        const parsed = Number(text)
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+          setLimitError(t('budgetLimitInvalid'))
+          return
+        }
+        if (!hasCap) {
+          setLimitError(t('budgetLimitUnknown'))
+          return
+        }
+        if (parsed > observedMax) {
+          setLimitError(`${t('budgetLimitTooHigh')}（$${observedMax}）`)
+          return
+        }
+        setLimitError(null)
+        onMutate([{ op: 'set', path: ['endpoints', index, 'budgetLimit'], value: parsed }])
+      }
+      const storedTooHigh = Number.isFinite(endpoint.budgetLimit) && hasCap && endpoint.budgetLimit > observedMax
       return h('div', { style: { ...card, background: 'var(--dsh-surface-secondary, transparent)' } },
         h('div', { style: row },
           h('strong', { style: { fontSize: 13 } }, endpoint.name || '?'),
@@ -131,6 +171,24 @@ window.__ModuleLoader__.load({
               ? [{ op: 'unset', path: ['endpoints', index, 'rpmLimit'] }]
               : [{ op: 'set', path: ['endpoints', index, 'rpmLimit'], value: parsed }])
           }, { disabled: readOnly }),
+        ),
+        h('div', { style: { ...row, marginTop: 8 } },
+          h('label', { style: { ...field, flex: '1 1 240px' } },
+            h('span', null, t('budgetLimit')),
+            h('input', {
+              style: input,
+              type: 'text',
+              value: endpoint.budgetLimit ?? '',
+              placeholder: hasCap ? String(observedMax) : '50',
+              disabled: readOnly,
+              onChange: event => updateLimit(event.target.value),
+            }),
+            h('span', { style: { fontSize: 11, opacity: 0.7 } }, capHint),
+            limitError === null ? null : h('span', { role: 'alert', style: { fontSize: 11, color: '#e06c75' } }, limitError),
+            storedTooHigh && limitError === null
+              ? h('span', { role: 'alert', style: { fontSize: 11, color: '#d19a66' } }, t('budgetLimitStored'))
+              : null,
+          ),
         ),
         h('div', { style: { marginTop: 8 } },
           h('button', {
@@ -245,6 +303,9 @@ window.__ModuleLoader__.load({
           t,
           readOnly,
           onMutate: mutate,
+          observedMax: Number.isFinite(value.observed?.[endpoint?.name]?.maxBudget)
+            ? value.observed[endpoint.name].maxBudget
+            : undefined,
         })),
         h(AddEndpoint, { t, readOnly, form }),
       )

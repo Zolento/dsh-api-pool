@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { ErrorKind } from '../src/pool/kinds.js'
 import { onFailure, endpointState } from '../src/pool/state.js'
 import { onSuccess } from '../src/pool/state.js'
+import { selectEndpoint } from '../src/pool/select.js'
 
 function poolConfig(endpoints, extra = {}) {
   return {
@@ -24,8 +25,17 @@ function poolConfig(endpoints, extra = {}) {
     requestTimeoutMs: 1000,
     failoverOnBadRequest: false,
     cooldowns: { rate_limit: 1000, server: 1000, timeout: 1000, connection: 1000, unknown: 1000, bad_request: 1000 },
-    endpoints: endpoints.map((name, index) => ({
-      name, baseURL: `https://${name}.example/v1`, priority: 100, enabled: true, index,
+    // A name is enough for most tests; a partial spec object makes the
+    // endpoint-specific options (such as budgetLimit) reachable.
+    endpoints: endpoints.map((entry, index) => ({
+      ...(typeof entry === 'string' ? { name: entry } : entry),
+      priority: 100,
+      enabled: true,
+      ...(typeof entry === 'string' ? {} : {}),
+      index,
+    })).map(endpoint => ({
+      ...endpoint,
+      baseURL: endpoint.baseURL ?? `https://${endpoint.name}.example/v1`,
     })),
     ...extra,
   }
@@ -261,4 +271,47 @@ test('a failed probe round leaves hasQuotaHints false so startup can retry', asy
   await pool.refreshQuotas(true)
   assert.equal(pool.hasQuotaHints(), false)
   assert.equal(pool.availability().ready, 1, 'an absent hint must not disable the endpoint')
+})
+
+test('a local spend limit stops an endpoint before the provider budget does', () => {
+  const pool = new ApiPool({
+    config: poolConfig([
+      { name: 'a', baseURL: 'https://a.example/v1', apiKey: 'k', budgetLimit: 50 },
+      { name: 'b', baseURL: 'https://b.example/v1', apiKey: 'k' },
+    ]),
+    resolveKey: async () => 'k',
+    now: () => 1000,
+  })
+  Object.assign(endpointState(pool.state, 'a'), { spend: 60, maxBudget: 100, budgetResetAt: 99_999 })
+
+  const rows = pool.status()
+  assert.equal(rows[0].maxBudget, 100, 'the provider budget is still reported')
+  assert.equal(rows[0].budgetCap, 50, 'the enforced cap is the tighter of the two')
+  assert.equal(rows[0].available, false)
+  assert.equal(rows[0].reason, 'quota')
+  assert.match(rows[0].state, /quota\(120%\)/, 'the percentage uses the enforced cap (60/50), not the provider budget')
+
+  const availability = pool.availability()
+  assert.equal(availability.ready, 1)
+  assert.equal(availability.next.name, 'a')
+  assert.equal(availability.next.reason, 'quota')
+  assert.equal(
+    selectEndpoint(pool.specs, pool.state, 1000, { strategy: 'least_loaded', rpmWindowMs: 60_000 })?.name,
+    'b',
+    'the capped endpoint must not be selected while another is ready',
+  )
+})
+
+test('a local limit applies even before a provider budget is known', () => {
+  const pool = new ApiPool({
+    config: poolConfig([{ name: 'a', baseURL: 'https://a.example/v1', apiKey: 'k', budgetLimit: 20 }]),
+    resolveKey: async () => 'k',
+    now: () => 1000,
+  })
+  endpointState(pool.state, 'a').spend = 25
+
+  const row = pool.status()[0]
+  assert.equal(row.budgetCap, 20)
+  assert.equal(row.available, false)
+  assert.equal(row.reason, 'quota', 'the local cap must exclude the endpoint on its own')
 })

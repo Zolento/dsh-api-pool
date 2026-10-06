@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { emptyState, endpointState, onFailure, onSuccess, recordRequest, isUnavailable, timeUntilAvailable, availabilityOf, quotaFromHeaders, quotaExhausted } from '../src/pool/state.js'
+import { emptyState, endpointState, onFailure, onSuccess, recordRequest, isUnavailable, timeUntilAvailable, availabilityOf, quotaFromHeaders, quotaExhausted, effectiveBudgetOf } from '../src/pool/state.js'
 import { selectEndpoint } from '../src/pool/select.js'
 import { ErrorKind } from '../src/pool/kinds.js'
 
@@ -201,4 +201,19 @@ test('a successful call clears transient penalties and keeps quota observations'
   assert.equal(entry.successes, 1)
   assert.equal(entry.lastLatencyMs, 12)
   assert.equal(entry.spend, 9.5, 'the quota observation still lands')
+})
+
+test('a local spend limit tightens the enforced cap', () => {
+  const entry = { spend: 60, maxBudget: 100 }
+
+  assert.equal(effectiveBudgetOf(entry, {}), 100, 'the provider budget alone when no limit is set')
+  assert.equal(effectiveBudgetOf(entry, { budgetLimit: 50 }), 50, 'the limit wins when it is tighter')
+  assert.equal(effectiveBudgetOf(entry, { budgetLimit: 500 }), 100, 'the provider budget wins over a larger limit')
+  assert.equal(effectiveBudgetOf({ spend: 10 }, { budgetLimit: 20 }), 20, 'usable before any probe reported a budget')
+  assert.equal(effectiveBudgetOf({ spend: 10 }, {}), undefined, 'no cap known at all')
+  assert.equal(effectiveBudgetOf({ spend: 10, maxBudget: 0 }, { budgetLimit: 20 }), 20, 'a zero provider budget is not a cap')
+
+  assert.equal(quotaExhausted(entry, { budgetLimit: 50 }), true, 'spent past the local limit')
+  assert.equal(quotaExhausted(entry, { budgetLimit: 61 }), false, 'still inside the local limit')
+  assert.equal(quotaExhausted(entry, {}), false, 'inside the provider budget')
 })

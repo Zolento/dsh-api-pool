@@ -78,9 +78,27 @@ export function applyRecovery(state, spec, now) {
 }
 
 /** Whether the actively probed spend already exhausts the binding budget. */
-export function quotaExhausted(entry) {
-  return entry.spend !== undefined && entry.maxBudget !== undefined && entry.maxBudget > 0
-    && entry.spend >= entry.maxBudget * 0.999
+/**
+ * The cap actually enforced for one endpoint: the tighter of the budget the
+ * provider grants and the local limit the user configured. Either may be absent.
+ * @returns {number|undefined} USD cap, or undefined when neither is known.
+ */
+export function effectiveBudgetOf(entry, spec) {
+  const provider = Number.isFinite(entry?.maxBudget) && entry.maxBudget > 0 ? entry.maxBudget : undefined
+  const local = Number.isFinite(spec?.budgetLimit) && spec.budgetLimit > 0 ? spec.budgetLimit : undefined
+  if (provider === undefined) return local
+  if (local === undefined) return provider
+  return Math.min(provider, local)
+}
+
+/**
+ * Whether an endpoint has spent its budget. A probe or a response header can find
+ * this without any error having been seen, which is what keeps the pool from
+ * calling an endpoint it already knows is out of budget.
+ */
+export function quotaExhausted(entry, spec) {
+  const cap = effectiveBudgetOf(entry, spec)
+  return cap !== undefined && entry.spend !== undefined && entry.spend >= cap * 0.999
 }
 
 /** Whether this endpoint must be skipped right now. */
@@ -90,7 +108,7 @@ export function isUnavailable(state, spec, now) {
   if (entry.disabledUntil === -1) return true
   if (entry.disabledUntil > now) return true
   if (entry.cooldownUntil > now) return true
-  return quotaExhausted(entry)
+  return quotaExhausted(entry, spec)
 }
 
 /** Requests inside the current RPM window, pruned to a bounded tail. */
@@ -222,7 +240,7 @@ export function availabilityOf(state, spec, now, quotaRecheckMs = 1_800_000) {
     reason = 'ready'
     availableAt = now
   }
-  if (quotaExhausted(entry)) {
+  if (quotaExhausted(entry, spec)) {
     const reset = entry.budgetResetAt ?? ((entry.quotaCheckedAt ?? now) + quotaRecheckMs)
     if (reset > availableAt) availableAt = reset
     reason = 'quota'

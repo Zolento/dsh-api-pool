@@ -23,6 +23,12 @@ const endpointSchema = z.object({
   model: z.string(),
   priority: z.number().step(1).default(100),
   rpmLimit: z.number().step(1),
+  /**
+   * Local spend cap in USD for this endpoint, for a tighter budget than the
+   * provider grants. It must not exceed the budget the provider reports (the
+   * settings page enforces that); the pool always enforces the tighter of the two.
+   */
+  budgetLimit: z.number().min(0),
   enabled: z.boolean().default(true),
 })
 
@@ -58,6 +64,13 @@ export const Config = z.object({
   failoverOnBadRequest: z.boolean().default(false).volatile(),
   logSuccesses: z.boolean().default(false).volatile(),
   cooldowns: z.dict(z.number()).default({ ...DEFAULT_COOLDOWNS }).volatile(),
+
+  /**
+   * The budget the provider reported per endpoint, published by the plugin so the
+   * settings page can enforce "local limit <= provider limit". Plugin-owned: the
+   * pool never reads it back, and it is rewritten after every quota probe.
+   */
+  observed: z.dict(z.object({ maxBudget: z.number().min(0) })).default({}).volatile(),
 })
 
 /** @returns plain values from an optionally-volatile config object. */
@@ -101,6 +114,7 @@ export function normalizeEndpoints(raw) {
       model: typeof candidate.model === 'string' && candidate.model.trim() !== '' ? candidate.model.trim() : undefined,
       priority: Number.isFinite(candidate.priority) ? candidate.priority : 100,
       rpmLimit: Number.isFinite(candidate.rpmLimit) && candidate.rpmLimit > 0 ? candidate.rpmLimit : undefined,
+      budgetLimit: Number.isFinite(candidate.budgetLimit) && candidate.budgetLimit > 0 ? candidate.budgetLimit : undefined,
       enabled: candidate.enabled !== false,
       index,
     })

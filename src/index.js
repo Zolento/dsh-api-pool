@@ -40,6 +40,13 @@ export const RELAY_TOKEN_REF = 'DSH_API_POOL_LOCAL_KEY'
 /** The `llm-pi-ai` settings namespace, where the provider profile lives. */
 export const PROVIDER_SETTINGS_NS = 'llm-pi-ai'
 
+/**
+ * This plugin's own settings namespace (endpoints and pool policy). Observed
+ * provider budgets are published here as `observed`, so the settings page can
+ * enforce "local spend limit <= provider budget".
+ */
+export const POOL_SETTINGS_NS = 'dsh-api-pool'
+
 /** Plugin-owned runtime directory under the harness home. */
 export function stateDir() {
   const home = process.env.DSH_HOME !== undefined && process.env.DSH_HOME !== ''
@@ -140,6 +147,13 @@ export function apply(ctx, config) {
     syncing: false,
     quotaPrimed: false,
     keyCache: new Map(),
+    // "name:limit:cap" of every oversize local limit already warned about.
+    limitWarned: new Set(),
+    // What this process last published, so a probe cannot rewrite the document
+    // with an identical value even if the volatile config does not echo it back.
+    publishedObserved: undefined,
+    // Endpoint names of the previous build, to detect an added/removed endpoint.
+    endpointNames: undefined,
   }
 
   /** Resolve one endpoint's API key: inline -> environment -> credentials service. */
@@ -218,6 +232,55 @@ export function apply(ctx, config) {
   }
 
   /** Rebuild the pool from current config; start (or reuse) the relay once. */
+  /**
+   * Publish the provider budgets we observed into the settings document.
+   *
+   * The settings page cannot see pool state directly, so without this it could
+   * not enforce the rule that a local spend limit must not exceed the provider's
+   * budget. The write is skipped when nothing changed, so a probe does not chase
+   * its own settings-update event.
+   */
+  async function publishObserved() {
+    const settings = settingsService
+    const pool = runtime.pool
+    if (settings === undefined || pool === undefined) return
+
+    const observed = {}
+    for (const row of pool.status()) {
+      if (Number.isFinite(row.maxBudget) && row.maxBudget > 0) observed[row.name] = { maxBudget: row.maxBudget }
+    }
+    if (jsonEqual(runtime.publishedObserved, observed)) return
+    if (jsonEqual(plainConfig(config).observed, observed)) {
+      runtime.publishedObserved = observed
+      return
+    }
+    try {
+      await settings.mutate(POOL_SETTINGS_NS, [{ op: 'set', path: ['observed'], value: observed }])
+    } catch (error) {
+      ctx.logger.warn(`api-pool: could not publish the observed budgets: ${String(error)}`)
+      return
+    }
+    runtime.publishedObserved = observed
+    // Visible in the event log, so "the settings page has the caps it needs" is
+    // checkable from outside the process.
+    events?.emit?.('budget_observed', {
+      endpoints: Object.entries(observed).map(([name, cap]) => `${name}:$${cap.maxBudget}`).join(' '),
+    })
+    // A stored limit above the provider's budget is a misconfiguration: the pool
+    // enforces the tighter figure anyway, so warn once instead of failing.
+    for (const spec of pool.specs) {
+      const cap = observed[spec.name]?.maxBudget
+      if (!Number.isFinite(spec.budgetLimit) || !Number.isFinite(cap) || spec.budgetLimit <= cap) continue
+      const key = `${spec.name}:${spec.budgetLimit}:${cap}`
+      if (runtime.limitWarned.has(key)) continue
+      runtime.limitWarned.add(key)
+      ctx.logger.warn(
+        `api-pool: endpoint "${spec.name}" has budgetLimit $${spec.budgetLimit} above the provider budget`
+        + ` $${cap}; the pool will stop it at $${cap}`,
+      )
+    }
+  }
+
   async function rebuild() {
     const plain = plainConfig(config)
     runtime.config = resolvePoolConfig(plain, {
@@ -241,11 +304,23 @@ export function apply(ctx, config) {
       store,
       events,
       resolveKey,
+      onQuotaRefresh: () => { void publishObserved() },
     })
 
     // Probe once at startup, past the throttle: persisted quota may have been
     // written by an older build (or by another process) and must not keep a
     // healthy endpoint disabled until the next scheduled refresh.
+    const names = runtime.pool.specs.map(spec => spec.name).join('|')
+    const endpointsChanged = runtime.endpointNames !== undefined && runtime.endpointNames !== names
+    runtime.endpointNames = names
+    if (endpointsChanged) {
+      // A new endpoint has no observed budget yet, and the settings page refuses
+      // to set a limit without one: probe now instead of waiting for the throttle.
+      void runtime.pool.refreshQuotas(true).catch((error) => {
+        ctx.logger.warn(`api-pool: quota probe after an endpoint change failed: ${String(error)}`)
+      })
+    }
+
     if (!runtime.quotaPrimed) {
       runtime.quotaPrimed = true
       const pool = runtime.pool
@@ -254,10 +329,11 @@ export function apply(ctx, config) {
           await pool.refreshQuotas(true).catch((error) => {
             ctx.logger.warn(`api-pool: startup quota probe failed: ${String(error)}`)
           })
-          if (pool.hasQuotaHints()) return
+          if (pool.hasQuotaHints()) break
           ctx.logger.warn(`api-pool: startup quota probe found no budget data (attempt ${attempt}/3); retrying`)
           await new Promise(resolve => setTimeout(resolve, 5000))
         }
+        await publishObserved()
       })()
     }
 
@@ -354,8 +430,8 @@ export function apply(ctx, config) {
         if (pool === undefined) return { kind: 'success', text: 'api-pool: still starting' }
         const lines = [`dsh-api-pool — ${pool.specs.length} endpoint(s), strategy=${pool.config.strategy}`]
         for (const row of pool.status()) {
-          const window = Number.isFinite(row.spend) && Number.isFinite(row.maxBudget) && row.maxBudget > 0
-            ? ` window=$${row.spend.toFixed(2)}/$${row.maxBudget}`
+          const window = Number.isFinite(row.spend) && Number.isFinite(row.budgetCap) && row.budgetCap > 0
+            ? ` window=$${row.spend.toFixed(2)}/$${row.budgetCap}`
             : ''
           const rpm = row.rpmLimit === undefined ? `${row.recent}` : `${row.recent}/${row.rpmLimit}`
           lines.push(`  ${row.name}  ${row.state}  rpm=${rpm}${window}${row.lastErrorKind === undefined ? '' : `  last=${row.lastErrorKind}`}`)

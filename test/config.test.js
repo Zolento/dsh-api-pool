@@ -82,3 +82,21 @@ test('jsonEqual drives the idempotent settings write', () => {
 })
 
 
+
+test('budgetLimit survives normalization only when it is a usable cap', () => {
+  const endpoints = normalizeEndpoints([
+    { name: 'a', baseURL: 'https://a.example/v1', budgetLimit: 50 },
+    { name: 'b', baseURL: 'https://b.example/v1', budgetLimit: 0 },
+    { name: 'c', baseURL: 'https://c.example/v1', budgetLimit: 'lots' },
+    { name: 'd', baseURL: 'https://d.example/v1' },
+  ])
+  assert.equal(endpoints[0].budgetLimit, 50)
+  assert.equal(endpoints[1].budgetLimit, undefined)
+  assert.equal(endpoints[2].budgetLimit, undefined)
+  assert.equal(endpoints[3].budgetLimit, undefined)
+})
+
+test('the config accepts the observed map the plugin publishes', () => {
+  const resolved = Config({ observed: { primary: { maxBudget: 100 } } })
+  assert.deepEqual(plainConfig(resolved).observed, { primary: { maxBudget: 100 } })
+})
