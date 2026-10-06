@@ -160,6 +160,7 @@ dsh-api-pool — 4 endpoint(s), strategy=least_loaded
 | `endpoints[].model` | — | 覆盖请求里的模型名 |
 | `endpoints[].priority` | `100` | 越小越优先 |
 | `endpoints[].rpmLimit` | — | 静态 RPM；探测到的值优先 |
+| `endpoints[].budgetLimit` | — | **单独限额**（USD）：给单个端点设一个比服务商预算更紧的上限，必须 ≤ 获取到的上限，详见下节 |
 | `endpoints[].enabled` | `true` | 静态启停 |
 | `safetyMargin` | `0.9` | 负载软闸门：已知 RPM 时，负载 ≥ 该值的端点仅在无更优选择时才用 |
 | `rpmWindowMs` | `60000` | RPM 滑动窗口 |
@@ -179,6 +180,24 @@ dsh-api-pool — 4 endpoint(s), strategy=least_loaded
 `bad_request=30000`、`unknown=30000`；实际冷却为
 `base × min(2^(连续失败数-1), 8)`，再与 `Retry-After` / 服务端 `reset_at` 取最大值，
 最后受 `maxCooldownMs` 封顶。
+
+### 单独限额（`budgetLimit`）
+
+给**单个端点**设一个比服务商预算更紧的美元上限（例如服务商给 $100，你只想让它用到 $80）。
+
+- **入口**：设置页 →「API 池」→ 每个端点的「单独限额（USD）」输入框（留空 = 不单独限额）。
+- **硬约束**：单独限额**必须 ≤ 获取到的上限**。设置页会直接显示 `获取到的上限：$100`，
+  输入超过它的值会被拒绝并且**不会写入**（提示 `必须 ≤ 获取到的上限（$100）`）；上限还没探测到时
+  不允许设置（提示等待配额探测）。用 profile 文件手填一个超限值时，池只按更紧的那个执行，
+  设置页会显示「当前保存的限额超过了获取到的上限，超出部分不会生效」，插件也会打一条 warn。
+- **上限从哪来**：插件每次配额探测（`/key/info`、`/user/info`）后，把观测到的预算发布到自己的
+  设置命名空间 `observed`（例如 `observed.primary.maxBudget = 100`），设置页据此校验；
+  发布时写一条 `[BUDGET_OBSERVED]` 事件，可用来确认设置页拿到的上限。
+- **生效方式**：实际生效上限 = `min(服务商预算, 单独限额)`。达到它就和服务商配额耗尽**完全一样**地
+  排除该端点（`/api-pool` 显示 `quota(NN%)`，`next recovery: <名字> in <时间> (quota)`，
+  之后的请求不再发给它），`window=` 显示的分母就是这个生效上限。
+- 服务商只上报上限、不保证余额时，单独限额依然生效（本地判定）；若之后服务商把预算调低到
+  你的限额以下，按更低的那个执行。
 
 ## 故障切换语义
 
@@ -222,7 +241,7 @@ dsh-api-pool — 4 endpoint(s), strategy=least_loaded
 | 路径 | 内容 |
 | --- | --- |
 | `~/.dsh/api-pool/api-pool.log` | 人类可读：`[FAILOVER] endpoint=... kind=... cooldown-seconds=...` |
-| `~/.dsh/api-pool/api-pool-events.jsonl` | 机器可读（`failover` / `all_endpoints_busy` / `quota_refresh` / `relay_error` / `success`） |
+| `~/.dsh/api-pool/api-pool-events.jsonl` | 机器可读（`failover` / `all_endpoints_busy` / `quota_refresh` / `quota_refresh_failed` / `budget_observed` / `relay_error` / `success`） |
 | `~/.dsh/api-pool/state.json` | 端点健康 / 冷却 / RPM 窗口 / 配额快照 |
 | `~/.dsh/api-pool/relay-token` | 中继共享令牌（0600） |
 
