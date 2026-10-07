@@ -35,8 +35,34 @@
 ## 仓库沿革与远端
 
 本仓库的 git 历史来自原来的 `dsh-api-pool` 独立仓库：`.git` 已上移到工作区根目录，历史中所有路径
-重写为 `dsh-api-pool/` 前缀（19 个 commit、14 个 tag 全部保留，因此 commit/tag 哈希已改变）。
+重写为 `dsh-api-pool/` 前缀（19 个 commit、14 个 tag 全部保留，因此 commit/tag 哈希已改变；tag 的
+tagger、日期与说明文字原样保留，只有指向的 commit 变了）。
 
-远端 `origin` 仍指向 `git@github.com:Zolento/dsh-api-pool.git`——那是**单个插件**的远端，
-而本仓库的树根现在是整个工作区。直接推送会把工作区结构（含 `dsh-loop/`、根 `README.md`）推到那个远端，
-推送前需要先决定远端策略（拆库、改名为 workspace 远端，或只对子目录做 subtree 推送）。
+- 远端 `origin` = `git@github.com:Zolento/my-dsh-plugins.git`（工作区仓库）。
+- 2026-10-08：用重写后的历史覆盖了远端 `main` 与全部 14 个 tag（覆盖前远端 `main` 为 `c56637e`，旧布局）。
+- 覆盖前的远端 `main` 保留为分支 `backup/pre-workspace-restructure`，确认无误后可删除：
+
+  ```sh
+  git push origin --delete backup/pre-workspace-restructure
+  ```
+
+- 重写前的完整 `.git` 另有本地打包备份，位于工作区之外。
+
+## 版本与 tag 规律
+
+所有插件都只面向 **DSH 0.2.0-rc.2**，tag 后缀固定为 `-dsh0.2.0-rc.2`；换 DSH 基线时后缀随之改变，
+插件版本号各自独立递进。tag 一律是附注 tag，message 沿用 `<插件名> <版本> for DSH <DSH版本>` 的写法。
+
+单个插件的仓库里 tag 形如 `v<插件版本>-dsh<DSH版本>`。本仓库容纳多个插件、版本号会相撞
+（`v0.1.0-dsh0.2.0-rc.2` 已属于 dsh-api-pool），因此**新** tag 带插件名前缀：
+
+| tag | 含义 |
+|---|---|
+| `v0.1.0-dsh0.2.0-rc.2` … `v0.1.13-dsh0.2.0-rc.2` | dsh-api-pool 的既有发布（保持原名） |
+| `dsh-loop-v0.1.0-dsh0.2.0-rc.2` | dsh-loop 首个版本，**尚未创建**（按下面命令打） |
+
+```sh
+git tag -a dsh-loop-v0.1.0-dsh0.2.0-rc.2 -m 'dsh-loop 0.1.0 for DSH 0.2.0-rc.2'
+git push origin dsh-loop-v0.1.0-dsh0.2.0-rc.2
+```
+
