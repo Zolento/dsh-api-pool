@@ -1,0 +1,8 @@
+# Dependencies and local artifacts are never committed: each plugin links the
+# running dsh installation into its own node_modules for standalone tests.
+node_modules/
+.npm-cache/
+.tmp/
+
+*.log
+.DS_Store

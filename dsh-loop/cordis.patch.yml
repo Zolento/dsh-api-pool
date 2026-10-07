@@ -1,0 +1,14 @@
+# dsh-loop bundle patch.
+#
+# One Host row. A plain-context registration is global, so the `/loop` command
+# and the loop driver reach every Agent in a profile that lists this bundle --
+# no agent-preset override is needed, and no shipped preset has to be restated.
+#
+# The model-facing control surface (`schedule_next_loop`, `stop_loop`) is NOT
+# declared here: the driver registers those tools into the looping Agent's own
+# scope (`agent.ctx`) for the duration of an iteration, so turns that are not
+# part of a loop never see them.
+- insert:
+    - id: dsh-loop
+      name: dsh-loop
+      config: {}

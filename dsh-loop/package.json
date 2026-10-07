@@ -1,0 +1,41 @@
+{
+  "name": "dsh-loop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Claude-Code-style /loop for DeepSeek Harness: session-scoped recurring agent turns with fixed-interval or adaptive scheduling.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./command": "./src/command.js",
+    "./tools": "./src/tools.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md",
+    "dsh-compat.json"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/dsh-commands": "*",
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  },
+  "scripts": {
+    "link-dsh": "node scripts/link-dsh.mjs",
+    "test": "node --test test/*.test.js",
+    "acceptance": "bash scripts/acceptance.sh"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,33 @@
+{
+  "$comment": "Machine-readable compatibility pin. The plugin is verified against exactly this DSH build; re-run `npm test && bash scripts/acceptance.sh` before changing it.",
+  "plugin": "dsh-loop",
+  "pluginVersion": "0.1.0",
+  "dsh": {
+    "version": "0.2.0-rc.2",
+    "tag": "dsh-v0.2.0-rc.2",
+    "commit": "639ed015397290b3745d163aafe02ffee4aa3f84"
+  },
+  "verifiedAt": "2026-10-08",
+  "seams": [
+    "ctx.commands.register({ definitionId, name, description, input.hint, handler }) -> CommandResult{kind,text}",
+    "CommandInvocation { commandId, agent, rawInput, attachments, signal }",
+    "ctx.tools.register(defineTool({ name, description, parameters, output:{schema,render}, execute, presentCall }))",
+    "value/parameter schema DSL: per-property `required: true`; output schema must union success and error shapes",
+    "agent.ctx scoped tool registration (requires the agent scope to hang below a context that injected `tools`)",
+    "Agent.followup(userMessage) queues an ordinary turn of its own and wakes the driver",
+    "Agent.status ('idle' | 'running'), Agent.session, Agent.ctx, Agent.inbox",
+    "ctx.agents.get(id)/list()/currentInitiator()/withoutInitiator()/withInitiator()",
+    "events: agent/status, agent/disposed, agent/inbox/claimed, agent/inbox/discarded, session/disposed, session/event",
+    "session events: turn/start, turn/end{reason.kind}, user/message",
+    "ctx.systemPrompt.section({ name, order, text(context) }) with per-assembly dynamic text",
+    "ctx.timeout(callback, delay) from @deepseek-ai/cordis-plugin-timer (fiber effect)",
+    "createUserMessage({ content, source }) from @deepseek-ai/dsh-llm; MessageSourceMap is merge-extensible",
+    "ctx.provide(name, value) for the `loop` service",
+    "bundle manifest: package.json dsh.bundle.patch, cordis.patch.yml insert, peerDependencies for @deepseek-ai/* resolution",
+    "dsh plugin --profile <name> add <dir>; dsh --profile <name> --patch <file> --dump-config"
+  ],
+  "runtimeDependencies": [
+    "@deepseek-ai/dsh-llm@0.2.0-rc.2 (peer)",
+    "@deepseek-ai/dsh-tools@0.2.0-rc.2 (peer)"
+  ]
+}
