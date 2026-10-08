@@ -1,20 +1,4 @@
-/**
- * dsh-loop — a Claude-Code-style `/loop` for DeepSeek Harness.
- *
- * `/loop 5m <prompt>` repeats an ordinary agent turn in the *current* session,
- * `/loop <prompt>` runs an adaptive loop whose iterations choose when to run
- * again, and `/loop status|stop|pause|resume` controls it. The loop is a
- * consumer of the normal agent loop: iterations enter through
- * `Agent.followup(...)`, so tools, permissions, compaction and session
- * recording are unchanged, and `@deepseek-ai/dsh-agent-loop` is untouched.
- *
- * Lifecycle is session-scoped and intentionally not persisted: a loop lives
- * while its Agent is live, and dies with it. Only one loop per session is
- * allowed; the driver's store is the single place a multi-loop revision would
- * have to change.
- *
- * @module dsh-loop
- */
+/** Compose the session-scoped /loop scheduler, command, tools and prompt section. */
 
 import { MIN_INTERVAL_MS, formatDuration } from './parser.js'
 import { DEFAULT_MAINTENANCE_PROMPT, renderLoopSection } from './prompt.js'
@@ -44,23 +28,13 @@ export {
 
 export const name = 'loop'
 
-/**
- * Required services. `timer` is the cordis timer service: it is the
- * repository's one in-process timer abstraction, and its effects are torn down
- * with this plugin, which is what keeps a stopped profile free of zombie loop
- * timers.
- */
+/** Required host services; timers are scoped to the plugin lifecycle. */
 export const inject = ['agents', 'timer']
 
 /** Prompt-section placement; after the shipped tool-guidance sections. */
 export const LOOP_SECTION_ORDER = 2_500
 
-/**
- * Validate the row config even when `apply` is called directly, without Loader
- * normalization (the shipped plugins do the same).
- * @param config - raw row config.
- * @returns resolved config.
- */
+/** Validate and resolve plugin configuration. */
 function resolveConfig(config) {
   const minIntervalMs = config?.minIntervalMs
   if (minIntervalMs !== undefined && !(Number.isSafeInteger(minIntervalMs) && minIntervalMs > 0)) {
@@ -76,13 +50,7 @@ function resolveConfig(config) {
   }
 }
 
-/**
- * Compose the loop driver, its human command, its scoped prompt section and its
- * per-iteration model tools.
- * @param ctx - plugin context.
- * @param config - optional row config.
- * @returns the composed {@link LoopService} (handy for tests and inspection).
- */
+/** Register the plugin surfaces and return the loop service. */
 export function apply(ctx, config = {}) {
   const resolved = resolveConfig(config)
   let toolsAvailable = false
@@ -90,8 +58,7 @@ export function apply(ctx, config = {}) {
     ctx,
     minIntervalMs: resolved.minIntervalMs,
     defaultPrompt: resolved.defaultPrompt,
-    // `ctx.timeout` is a fiber effect: plugin teardown cancels every armed loop
-    // timer even if a state was somehow missed by the explicit cleanup paths.
+    // Plugin teardown also cancels timers through Cordis effects.
     timer: { schedule: (callback, delay) => ctx.timeout(callback, delay) },
     toolsAvailable: () => toolsAvailable,
     attachTools: state => registerLoopTools({
@@ -102,17 +69,12 @@ export function apply(ctx, config = {}) {
     }),
   })
 
-  // The driver is provided as the `loop` service: `inject: ['loop']` gives other
-  // plugins the session-scoped state (status surfaces, future multi-loop
-  // extensions), and it is what an out-of-process acceptance probe checks to
-  // prove the row activated.
+  // Expose loop state to other plugins.
   ctx.provide('loop', service)
 
-  // One composite effect: the listeners stay installed until the service's own
-  // timers and registrations have been released.
+  // Release service state before removing lifecycle listeners.
   ctx.effect(function* () {
-    // An idle Agent is the only moment an iteration may start, and the moment a
-    // finished iteration is accounted for.
+    // Idle transitions drive iteration cleanup and scheduling.
     ctx.on('agent/status', ({ agent, status }) => {
       if (status === 'idle') service.onIdle(agent)
     })
@@ -125,8 +87,7 @@ export function apply(ctx, config = {}) {
     ctx.on('agent/inbox/claimed', ({ agent, message, turn }) => service.onClaimed(agent, message.id, turn))
     ctx.on('agent/inbox/discarded', ({ agent, message }) => service.onDiscarded(agent, message.id))
 
-    // Durable turn facts classify an iteration's turn. Restore/fork never
-    // republishes seed events, so replaying history cannot restart a loop.
+    // Session restore does not replay seed events here.
     ctx.on('session/event', (session, event) => {
       const agent = ctx.agents.get(session.id)
       if (agent === undefined || agent.session !== session) return
@@ -148,8 +109,7 @@ export function apply(ctx, config = {}) {
     yield () => service.dispose()
   }, 'dsh-loop lifecycle')
 
-  // The scoped system prompt: rendered only while the calling Agent is inside
-  // one of its loop's iteration turns, so non-loop turns are untouched.
+  // Render guidance when the service marks an iteration as pending.
   ctx.inject(['systemPrompt'], promptCtx => {
     service.setPromptSectionAvailable(true)
     promptCtx.effect(() => promptCtx.systemPrompt.section({
@@ -172,8 +132,7 @@ export function apply(ctx, config = {}) {
     commandCtx.effect(() => registerLoopCommand({ ctx: commandCtx, service }), 'dsh-loop command')
   })
 
-  // Compose the model-facing control surface only where tools exist. The tools
-  // themselves are registered per iteration into the looping Agent's scope.
+  // Register model tools per iteration when the tools service exists.
   ctx.inject(['tools'], () => {
     toolsAvailable = true
   })

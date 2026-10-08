@@ -1,10 +1,4 @@
-/**
- * Race conditions and lifecycle fences.
- *
- * Every case here is deterministic: the manual clock lets a test fire a timer
- * callback *after* the arm that owned it was invalidated, which is the exact
- * situation `clearTimeout` alone cannot protect against.
- */
+/** Deterministic timer races and lifecycle cleanup. */
 
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'

@@ -1,33 +1,15 @@
-/**
- * The strict `/loop` grammar: durations and the command's own arguments.
- *
- * Every duration in this plugin -- `/loop 5m <prompt>`, `schedule_next_loop({
- * delay: '5m' })`, config -- goes through {@link parseDuration}. It accepts
- * exactly `<digits><s|m|h>` and nothing else: no natural-language parsing, no
- * compound expressions, no bare numbers. That keeps an unrecognized token a
- * prompt rather than a silently reinterpreted interval.
- *
- * @module dsh-loop/parser
- */
+/** Parse /loop arguments and durations in the form <digits><s|m|h>. */
 
 /** Units the loop grammar accepts, in milliseconds. */
 export const DURATION_UNITS = Object.freeze({ s: 1_000, m: 60_000, h: 3_600_000 })
 
-/**
- * Smallest interval a loop may be armed with. A tight interval is a foot-gun:
- * it burns model turns faster than a human can react, so the floor is enforced
- * here and mirrored by the command, the config and the adaptive tool.
- */
+/** Default minimum interval for fixed loops and adaptive scheduling. */
 export const MIN_INTERVAL_MS = 30_000
 
 /** `30s`, `5m`, `1h` -- nothing else. */
 const DURATION_PATTERN = /^(\d+)([smh])$/iu
 
-/**
- * A token that is trying to be a duration but is malformed: digits followed by
- * letters (`5x`, `5min`, `30sec`). Reported instead of being folded into the
- * prompt, because the human clearly meant an interval.
- */
+/** Reject digit-plus-letter tokens with unsupported units, such as 5min. */
 const MALFORMED_DURATION_PATTERN = /^\d+[a-z]+$/iu
 
 /** Control words are recognised only as the complete argument. */
@@ -37,11 +19,7 @@ export const CONTROL_WORDS = Object.freeze(['status', 'stop', 'pause', 'resume']
 export const USAGE =
   'Usage: /loop [<interval>] [<prompt>] | /loop status | /loop stop | /loop pause | /loop resume'
 
-/**
- * Parse one strict duration token.
- * @param text - candidate token, e.g. `5m`.
- * @returns the duration in milliseconds, or `undefined` when it is not a duration.
- */
+/** Parse a positive safe duration in milliseconds, or return undefined. */
 export function parseDuration(text) {
   const match = DURATION_PATTERN.exec(String(text).trim())
   if (match === null) return undefined
@@ -51,23 +29,13 @@ export function parseDuration(text) {
   return Number.isSafeInteger(ms) && ms > 0 ? ms : undefined
 }
 
-/**
- * Whether a token looks like an attempted duration with a bad unit.
- * @param text - candidate token.
- * @returns true when the token is `<digits><letters>` but not a valid duration.
- */
+/** Detect digit-plus-letter tokens with an invalid duration value or unit. */
 export function looksLikeMalformedDuration(text) {
   const token = String(text).trim()
-  return DURATION_PATTERN.test(token) === false && MALFORMED_DURATION_PATTERN.test(token)
+  return MALFORMED_DURATION_PATTERN.test(token) && parseDuration(token) === undefined
 }
 
-/**
- * Render a non-negative millisecond span as a compact duration (`5m`, `1m 30s`).
- * Seconds are rounded first so the parts always carry: 3_599_995ms is `1h`, not
- * `59m 60s`.
- * @param ms - span in milliseconds.
- * @returns the compact label.
- */
+/** Format a non-negative span, rounding seconds before splitting into units. */
 export function formatDuration(ms) {
   if (!Number.isFinite(ms) || ms < 0) return 'unknown'
   const totalSeconds = Math.round(ms / 1_000)
@@ -82,20 +50,7 @@ export function formatDuration(ms) {
   return parts.join(' ')
 }
 
-/**
- * Parse the complete argument text of a `/loop` invocation.
- *
- * Grammar:
- * - empty input starts a loop whose prompt comes from `.dsh/loop.md` or the default;
- * - a complete control word (`status`/`stop`/`pause`/`resume`) is a control command;
- * - a leading strict duration arms a fixed loop;
- * - a leading malformed duration is an error, never a prompt;
- * - anything else is the prompt of an adaptive loop.
- *
- * @param rawInput - text after the command name, verbatim.
- * @param options - `minIntervalMs` overrides the floor; `maxIntervalMs` bounds the top.
- * @returns a discriminated parse result.
- */
+/** Parse controls, fixed intervals or adaptive prompts. Options override interval bounds. */
 export function parseLoopInput(rawInput, options = {}) {
   const minIntervalMs = options.minIntervalMs ?? MIN_INTERVAL_MS
   const maxIntervalMs = options.maxIntervalMs ?? Number.MAX_SAFE_INTEGER

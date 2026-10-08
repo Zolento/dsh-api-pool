@@ -1,17 +1,5 @@
 #!/usr/bin/env node
-/**
- * Dev-only module wiring for standalone tests.
- *
- * This plugin imports a few `@deepseek-ai/dsh-*` packages. At runtime those
- * resolve from the running dsh installation through the profile's peer
- * interception layer (`~/.dsh/profiles/node_modules`), which only applies to a
- * plugin linked into a profile. `node --test` runs outside that layer, so this
- * script links the same installed copies into `node_modules/@deepseek-ai/` --
- * the documented "the devDependency copy serves your standalone tests" half of
- * the peer rule. Nothing here is shipped; `node_modules` stays untracked.
- *
- * Usage: node scripts/link-dsh.mjs [--dsh <path to installed @deepseek-ai/dsh>]
- */
+/** Link installed DSH packages for standalone tests. Usage: node scripts/link-dsh.mjs [--dsh <path>]. */
 
 import { existsSync, mkdirSync, rmSync, symlinkSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'

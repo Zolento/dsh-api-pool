@@ -1,13 +1,4 @@
-/**
- * Composition-level tests: the plugin mounted over the real cordis context and
- * the real services it composes with (timer, sessions, tools, system prompt,
- * commands, agent registry). Only the Agent is scripted.
- *
- * These tests answer the questions a unit test cannot: does `/loop` reach the
- * command registry, does an iteration arrive through `Agent.followup`, do the
- * adaptive tools exist only during an iteration, and does the scoped prompt
- * section render for exactly that turn.
- */
+/** Plugin integration with real registries and a scripted Agent. */
 
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'

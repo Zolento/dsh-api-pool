@@ -1,35 +1,13 @@
-/**
- * Model-facing text for loops: the per-iteration message and the scoped
- * system-prompt section.
- *
- * Two rules shape this module.
- *
- * 1. The loop prompt is stable. Every iteration carries the *original* prompt
- *    verbatim, never a rewritten or summarized one, so the recurrence cannot
- *    drift as the session grows.
- * 2. Continuity is the session's job. The iteration message says nothing about
- *    previous iterations and copies no conversation state: this is the same
- *    Agent, in the same conversation, with the same workspace.
- *
- * @module dsh-loop/prompt
- */
+/** Iteration messages and scoped system guidance; reuse the original loop prompt. */
 
-/**
- * Used when `/loop` carries no prompt and the workspace has no `.dsh/loop.md`.
- * Deliberately short and non-committal: it tells the model how to spend an
- * unattended iteration without inventing an objective the human never asked for.
- */
+/** Fallback when neither the command nor .dsh/loop.md supplies a prompt. */
 export const DEFAULT_MAINTENANCE_PROMPT = [
   'Continue making useful progress on the current task.',
   'Inspect the workspace and any running work, then take the next concrete step.',
   'Do not repeat work that is already done or merely describe what could be done.',
 ].join(' ')
 
-/**
- * The per-iteration user message. One text block, one stable shape.
- * @param input - iteration facts and the note the loop cannot put in a prompt section.
- * @returns one model-facing text content block.
- */
+/** Render one iteration message, with adaptive guidance when no prompt section exists. */
 export function renderLoopIteration({ prompt, iteration, adaptiveNote }) {
   const lines = [
     '<loop_iteration>',
@@ -70,12 +48,7 @@ export const ADAPTIVE_GUIDANCE = [
   'the requested delay has elapsed.',
 ].join('\n')
 
-/**
- * The scoped system-prompt section rendered for one loop iteration turn only.
- * @param state - the loop's current view.
- * @param format - `formatDuration` from the parser module.
- * @returns the section text, or an empty string outside an iteration turn.
- */
+/** Render system guidance for a loop iteration. */
 export function renderLoopSection(state, format) {
   if (state === undefined) return ''
   if (state.mode === 'adaptive') return ADAPTIVE_GUIDANCE

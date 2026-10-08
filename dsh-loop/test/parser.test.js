@@ -1,7 +1,4 @@
-/**
- * `/loop` grammar: strict, small, and impossible to mistake a control word or a
- * malformed interval for a prompt.
- */
+/** Command and duration parsing. */
 
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
@@ -106,6 +103,14 @@ describe('parseLoopInput', () => {
     assert.equal(parsed.kind, 'error')
     assert.match(parsed.message, /below the 30s minimum/u)
     assert.deepEqual(parseLoopInput('30s hello'), { kind: 'start', intervalMs: 30_000, prompt: 'hello' })
+  })
+
+  it('rejects zero and overflowing durations instead of starting an adaptive loop', () => {
+    for (const token of ['0s', '0m', '0h', '9007199254741s', '999999999999999999999h']) {
+      assert.equal(looksLikeMalformedDuration(token), true)
+      assert.equal(parseLoopInput(`${token} check the job`).kind, 'error', token)
+      assert.equal(parseLoopInput(token).kind, 'error', token)
+    }
   })
 
   it('honours a configured floor and ceiling', () => {

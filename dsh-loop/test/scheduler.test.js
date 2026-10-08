@@ -1,10 +1,4 @@
-/**
- * Fixed-interval and adaptive scheduling semantics, driven through a manual
- * clock so every "exactly one follow-up" claim is exact rather than timing-based.
- *
- * The properties under test are the ones a loop gets wrong in practice:
- * never overlap, never backlog, never fire after a stop, never spin.
- */
+/** Fixed and adaptive scheduling on a manual clock. */
 
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
@@ -363,6 +357,7 @@ describe('session isolation and cleanup', () => {
     const { clock, double, agent, service, tools } = setup()
     service.start(agent, { mode: 'fixed', prompt: PROMPT, intervalMs: INTERVAL })
     clock.advance(0)
+    service.onClaimed(agent, double.followups[0].id, 1)
     assert.equal(tools.attached, 1, 'the control tools exist during an iteration')
     service.discard(agent)
     assert.equal(clock.pending(), 0)
@@ -376,8 +371,9 @@ describe('session isolation and cleanup', () => {
     const { clock, double, agent, service, tools } = setup()
     service.start(agent, { mode: 'fixed', prompt: PROMPT, intervalMs: INTERVAL })
     clock.advance(0)
-    assert.equal(tools.attached, 1)
+    assert.equal(tools.attached, 0, 'queued messages expose no tools')
     service.onClaimed(agent, double.followups[0].id, 1)
+    assert.equal(tools.attached, 1)
     service.onUserMessage(agent, double.followups[0].id)
     double.setIdle()
     service.onIdle(agent)
@@ -426,6 +422,8 @@ describe('dispose', () => {
     service.start(first.agent, { mode: 'fixed', prompt: 'first', intervalMs: INTERVAL })
     service.start(second.agent, { mode: 'fixed', prompt: 'second', intervalMs: INTERVAL })
     clock.advance(0)
+    service.onClaimed(first.agent, first.followups[0].id, 1)
+    service.onClaimed(second.agent, second.followups[0].id, 1)
     assert.equal(attached, 2)
 
     service.dispose()
@@ -437,4 +435,3 @@ describe('dispose', () => {
     assert.equal(second.followups.length, 1)
   })
 })
-

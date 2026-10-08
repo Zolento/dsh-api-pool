@@ -1,5 +1,5 @@
 {
-  "$comment": "Machine-readable compatibility pin. The plugin is verified against exactly this DSH build; re-run `npm test && bash scripts/acceptance.sh` before changing it.",
+  "$comment": "Verified DSH baseline. Run tests and acceptance before updating.",
   "plugin": "dsh-loop",
   "pluginVersion": "0.1.0",
   "dsh": {

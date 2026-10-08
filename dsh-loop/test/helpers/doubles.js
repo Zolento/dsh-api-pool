@@ -1,12 +1,4 @@
-/**
- * Deterministic test doubles: a manual clock/timer pair and a minimal Agent.
- *
- * Scheduling semantics are the part of this plugin that most needs exact
- * assertions ("exactly one follow-up", "no backlog", "stale timer ignored"), so
- * those tests drive {@link LoopService} directly through a manual timer queue
- * instead of real wall-clock waiting. Global timer mocking is deliberately
- * avoided here: the plugin's own timer is the only thing under test.
- */
+/** Manual clock, timer and Agent doubles for scheduler tests. */
 
 /** One armed timer in the manual queue. */
 let nextTimerId = 0
@@ -70,6 +62,7 @@ export function createManualClock(start = 1_700_000_000_000) {
 export function createAgentDouble({ id, session = { id }, live = true } = {}) {
   const followups = []
   const toolsDisposers = []
+  const queued = []
   const agent = {
     id,
     session,
@@ -78,8 +71,18 @@ export function createAgentDouble({ id, session = { id }, live = true } = {}) {
     },
     __status: 'idle',
     __live: live,
+    inbox: {
+      get nextTurn() { return queued },
+      remove(messageId) {
+        const index = queued.findIndex(message => message.id === messageId)
+        if (index === -1) return false
+        queued.splice(index, 1)
+        return true
+      },
+    },
     followup(message) {
       followups.push(message)
+      queued.push(message)
     },
     cancel() {},
     whenIdle() {

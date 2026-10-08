@@ -1,13 +1,4 @@
-/**
- * The human-facing `/loop` command.
- *
- * This module owns the grammar's *presentation*: parsing lives in `parser.js`,
- * scheduling lives in `service.js`, and the model surface lives in `tools.js`.
- * The split mirrors `/goal`, where `command-goal` is a thin human front-end over
- * a domain the model and the driver own.
- *
- * @module dsh-loop/command
- */
+/** Human-facing /loop command and status rendering. */
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -46,15 +37,7 @@ function activityLabel(view) {
   return 'idle'
 }
 
-/**
- * Render one loop view. Timestamps are relative to `now`, because a loop is a
- * wall-clock commitment and absolute times are what the human would have to
- * convert themselves.
- * @param title - leading line.
- * @param view - loop view.
- * @param now - reference time.
- * @returns command result text.
- */
+/** Render status with times relative to `now`. */
 export function renderLoopStatus(title, view, now) {
   const cadence = view.mode === 'fixed'
     ? `fixed, every ${formatDuration(view.intervalMs)}`
@@ -86,30 +69,19 @@ export function renderLoopStatus(title, view, now) {
   return lines.join('\n')
 }
 
-/**
- * Read the workspace loop prompt, when the session has one.
- * @param agent - the invoking Agent.
- * @returns the trimmed file content, or undefined when absent/empty/unreadable.
- */
+/** Read the trimmed workspace prompt; return undefined if absent, empty or unreadable. */
 export function readLoopPromptFile(agent) {
   const cwd = agent.session?.header?.cwd ?? process.cwd()
   try {
     const text = readFileSync(join(cwd, LOOP_FILE), 'utf8').trim()
     return text.length === 0 ? undefined : text
   } catch {
-    // A missing or unreadable file simply means "no file prompt"; the default
-    // maintenance prompt is the documented fallback.
+    // Fall back to the configured default prompt.
     return undefined
   }
 }
 
-/**
- * Register `/loop`.
- * @param options - collaborators.
- * @param options.ctx - plugin context exposing `commands`.
- * @param options.service - the loop driver.
- * @returns the registration disposer.
- */
+/** Register /loop and return its disposer. */
 export function registerLoopCommand({ ctx, service }) {
   return ctx.commands.register({
     definitionId: CommandDefinitionId('dsh-loop'),
@@ -120,10 +92,7 @@ export function registerLoopCommand({ ctx, service }) {
   })
 }
 
-/**
- * Execute one parsed `/loop` invocation. Exported for tests, which drive it
- * through the real command registry exactly as a UI adapter does.
- */
+/** Parse and execute one /loop invocation. */
 export function execute(ctx, service, invocation) {
   const parsed = parseLoopInput(invocation.rawInput, { minIntervalMs: service.minIntervalMs })
   if (parsed.kind === 'error') return { kind: 'error', text: `${parsed.message}\n${USAGE}` }

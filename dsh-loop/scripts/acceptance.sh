@@ -1,13 +1,5 @@
 #!/usr/bin/env bash
-# dsh-loop acceptance:
-#   1. unit + integration tests (node --test, fake/manual clocks);
-#   2. bundle composition in an isolated DSH_HOME profile (no --patch needed);
-#   3. a REAL `dsh` boot whose probe reports, from inside the running process,
-#      that the `dsh-loop` row is active, the `loop` service is provided, and
-#      `/loop` is registered in the command registry.
-#
-# Everything runs against a throwaway DSH_HOME and an alternate port, so a
-# developer's own harness (and its relay ports) is never touched.
+# Verify tests, profile composition and boot with an isolated DSH_HOME.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

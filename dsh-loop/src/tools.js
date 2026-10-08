@@ -1,28 +1,10 @@
-/**
- * Model-facing adaptive control: `schedule_next_loop` and `stop_loop`.
- *
- * These two tools are the entire adaptive surface. They are registered into the
- * looping Agent's scope (`agent.ctx`) for the duration of one iteration turn and
- * disposed when that turn ends, so:
- *
- * - a turn that is not part of a loop iteration never sees them (no catalog
- *   pollution, and no chance of a stray call from an unrelated session);
- * - a subagent never inherits them;
- * - neither tool touches the running turn: scheduling only records a time, and
- *   stop ends the loop without cancelling the turn that called it.
- *
- * @module dsh-loop/tools
- */
+/** Model-facing schedule_next_loop and stop_loop, registered in the Agent’s scope. */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { LoopError } from './service.js'
 import { formatDuration, parseDuration } from './parser.js'
 
-/**
- * Output value schemas, written in the repository's value-schema DSL: a
- * per-property `required: true` flag, not JSON Schema's object-level `required`
- * array (which `defineTool` rejects).
- */
+/** Value schemas use per-property required flags. */
 const SCHEDULE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -55,11 +37,7 @@ const ERROR_SCHEMA = {
   },
 }
 
-/**
- * A tool's output schema must accept every value `execute` can return, so each
- * one is the union of its success shape and the error shape (the shipped
- * Schedule tools use the same construction).
- */
+/** Tool outputs accept both success and error values. */
 const SCHEDULE_OUTPUT = { oneOf: [SCHEDULE_SCHEMA, ERROR_SCHEMA] }
 const STOP_OUTPUT = { oneOf: [STOP_SCHEMA, ERROR_SCHEMA] }
 
@@ -91,10 +69,7 @@ function toolError(code, message) {
   return { code, message }
 }
 
-/**
- * Authorise one loop-tool call: the exact live Agent, inside its own driver,
- * inside an admitted iteration of the loop these tools belong to.
- */
+/** Require the owning live Agent, its driver context and a pending iteration. */
 function requireIteration(ctx, exec, agent, service, loopId) {
   if (exec.agent !== agent) {
     throw new LoopError('The loop tools belong to another session.', 'LOOP_TOOL_WRONG_AGENT')
@@ -117,15 +92,7 @@ function requireIteration(ctx, exec, agent, service, loopId) {
   return state
 }
 
-/**
- * Register the model-facing control surface for one loop iteration.
- * @param options - collaborators.
- * @param options.ctx - plugin context exposing `agents`.
- * @param options.agent - the looping Agent (tool scope owner).
- * @param options.service - the loop driver.
- * @param options.loopId - loop identity captured when the tools were registered.
- * @returns an idempotent disposer for every registration.
- */
+/** Register iteration tools and return an idempotent disposer. */
 export function registerLoopTools({ ctx, agent, service, loopId }) {
   const toolCtx = agent.ctx
   const disposers = []

@@ -1,17 +1,4 @@
-/**
- * Integration harness: the loop plugin composed over the *real* cordis context
- * and the real registries this feature depends on (timer, sessions, tools,
- * system prompt, commands, agents).
- *
- * Only the Agent is scripted: a real `AgentLoop` would need an LLM adapter and a
- * wall clock, and its turn lifecycle is not what these tests are pinning down.
- * The scripted Agent reproduces the parts of the contract the driver relies on
- * -- `status` transitions published as `agent/status`, inbox claim/discard
- * events, and balanced `turn/start` / `user/message` / `turn/end` session
- * events -- and nothing else.
- *
- * @module dsh-loop/test/harness
- */
+/** Real host services with a scripted Agent for integration tests. */
 
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { agentEvents } from '@deepseek-ai/dsh-agent'
@@ -87,11 +74,7 @@ export async function mountHarness({ config = {}, autoRun = true, onTurn } = {})
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(CommandRuntime)
   await ctx.plugin(AgentRegistry)
-  // The agent scope must hang below a context that injected `tools` and
-  // `systemPrompt`, exactly as `AgentLoop` does in production
-  // (`static inject = ['agents', 'sessions', 'llm', 'tools', 'systemPrompt', ...]`):
-  // service resolution walks the *accessing* context's fiber chain, so an agent
-  // scope created directly under the root could not reach `agent.ctx.tools`.
+  // Agent scopes must descend from a context that injects tools and systemPrompt.
   let driverCtx
   await ctx.plugin({
     name: 'loop-test-driver',
@@ -129,9 +112,7 @@ export async function mountHarness({ config = {}, autoRun = true, onTurn } = {})
       options: {},
       session,
       inbox,
-      // Replaced below: the scope key must be the Agent itself, exactly as
-      // `AgentRegistry` mints it (`scopeTarget(agent, agent)`), because tool and
-      // prompt assemblies are resolved for `scope: agent`.
+      // Tool and prompt assemblies use the Agent itself as the scope key.
       ctx: undefined,
       get status() {
         return status

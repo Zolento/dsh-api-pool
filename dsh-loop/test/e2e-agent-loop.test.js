@@ -1,12 +1,4 @@
-/**
- * End-to-end over the REAL agent loop.
- *
- * The other suites script the Agent because they pin scheduler semantics. This
- * one mounts the production `@deepseek-ai/dsh-agent-loop` and scripts only the
- * model, so the claim "a loop starts normal agent turns" is checked against real
- * turns: real pre-step, real tool dispatch, real `turn/start`/`turn/end`
- * session recording, and real serialization of physical turns.
- */
+/** Production AgentLoop integration with a scripted model. */
 
 import assert from 'node:assert/strict'
 import { afterEach, describe, it } from 'node:test'
@@ -14,10 +6,10 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
-import LlmRuntime, { LlmAdapter } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { LlmAdapter, createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
-import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import TimerService from '@deepseek-ai/cordis-plugin-timer'
 import { apply as applyLoop } from '../src/index.js'
@@ -62,7 +54,7 @@ class ScriptedAdapter extends LlmAdapter {
     this.concurrent += 1
     this.maxConcurrent = Math.max(this.maxConcurrent, this.concurrent)
     try {
-      const entry = this.script(this.requests.length - 1, options) ?? textResponse('done')
+      const entry = await this.script(this.requests.length - 1, options) ?? textResponse('done')
       if (entry instanceof Error) throw entry
       for (const chunk of entry) yield chunk
     } finally {
@@ -205,5 +197,170 @@ describe('real agent loop', () => {
     const status = await runCommand(ctx, agent, '/loop status')
     assert.match(status.text, /Status: active \(fixed, every 1s\)/u)
     await runCommand(ctx, agent, '/loop stop')
+  })
+})
+
+describe('loop controls', () => {
+  it('resumes an adaptive loop while its turn is still running', async () => {
+    const held = Promise.withResolvers()
+    const { ctx, agent, service, adapter } = await mountAgentLoopHarness(async index => {
+      if (index === 0) await held.promise
+      return textResponse('done')
+    })
+    try {
+      await runCommand(ctx, agent, '/loop watch the job')
+      await waitFor(() => adapter.requests.length === 1, 'the first request')
+      await runCommand(ctx, agent, '/loop pause')
+      const resumed = await runCommand(ctx, agent, '/loop resume')
+      assert.equal(resumed.kind, 'success')
+      held.resolve()
+      await agent.whenIdle()
+      assert.equal(loopMessages(agent.session).length, 2)
+      assert.equal(adapter.maxConcurrent, 1)
+      assert.equal(service.get(agent).pauseReason, 'awaiting-schedule')
+    } finally {
+      held.resolve()
+    }
+  })
+
+  it('lets human resume override the current adaptive turn’s schedule', async () => {
+    const held = Promise.withResolvers()
+    const { ctx, agent, service, adapter } = await mountAgentLoopHarness(async index => {
+      if (index === 0) return toolCallResponse('schedule-resume', 'schedule_next_loop', { delay: '1h' })
+      if (index === 1) await held.promise
+      return textResponse('done')
+    })
+    try {
+      await runCommand(ctx, agent, '/loop watch the job')
+      await waitFor(() => adapter.requests.length === 2, 'the scheduled turn to keep running')
+      assert.equal(service.get(agent).scheduleRequest.delayMs, 3_600_000)
+      await runCommand(ctx, agent, '/loop pause')
+      await runCommand(ctx, agent, '/loop resume')
+      held.resolve()
+      await agent.whenIdle()
+      assert.equal(loopMessages(agent.session).length, 2)
+      assert.equal(adapter.maxConcurrent, 1)
+    } finally {
+      held.resolve()
+    }
+  })
+
+  for (const action of ['pause', 'stop']) {
+    it(`removes an unclaimed iteration on ${action} without discarding human input`, async () => {
+      const held = Promise.withResolvers()
+      const { ctx, agent, service, adapter } = await mountAgentLoopHarness(() => textResponse('done'))
+      const maintenance = agent.runMaintenance(() => held.promise)
+      try {
+        agent.followup(createUserMessage({ content: 'Answer the human message.' }))
+        await runCommand(ctx, agent, '/loop 1h watch the job')
+        await waitFor(() => service.get(agent)?.pending?.phase === 'queued', 'the queued iteration')
+        const result = await runCommand(ctx, agent, `/loop ${action}`)
+        assert.equal(result.kind, 'success')
+        assert.equal(agent.inbox.nextTurn.length, 1)
+        if (action === 'stop') assert.doesNotMatch(result.text, /already running/u)
+        held.resolve()
+        await maintenance
+        await agent.whenIdle()
+        assert.equal(loopMessages(agent.session).length, 0)
+        assert.equal(adapter.requests.length, 1, 'only the human turn runs')
+        if (action === 'pause') {
+          assert.equal(service.get(agent).phase, 'paused')
+          await runCommand(ctx, agent, '/loop resume')
+          await agent.whenIdle()
+          assert.equal(loopMessages(agent.session).length, 1)
+        } else {
+          assert.equal(service.get(agent), undefined)
+          await runCommand(ctx, agent, '/loop 1h a new loop')
+          await waitFor(() => loopMessages(agent.session).length === 1, 'the replacement loop')
+        }
+      } finally {
+        held.resolve()
+        await maintenance
+      }
+    })
+  }
+
+  it('clears canceled queued work and continues on the next fixed tick', async () => {
+    const held = Promise.withResolvers()
+    const { ctx, agent, service, adapter } = await mountAgentLoopHarness(() => textResponse('done'))
+    const maintenance = agent.runMaintenance(() => held.promise)
+    try {
+      service.start(agent, { mode: 'fixed', prompt: 'watch the job', intervalMs: 100 })
+      await waitFor(() => service.get(agent)?.pending?.phase === 'queued', 'the queued iteration')
+      agent.cancel({ kind: 'user' })
+      assert.equal(service.view(service.get(agent)).running, false)
+      assert.equal(service.get(agent).lastEndReason, 'discarded')
+      held.resolve()
+      await maintenance
+      await waitFor(() => adapter.requests.length >= 1, 'the next fixed iteration')
+      await runCommand(ctx, agent, '/loop stop')
+      assert.equal(loopMessages(agent.session).length, 1)
+    } finally {
+      held.resolve()
+      await maintenance
+    }
+  })
+
+  it('cleans iteration tools and guidance before a queued human turn', async () => {
+    const held = Promise.withResolvers()
+    let agent
+    let ordinaryAssembly
+    const mounted = await mountAgentLoopHarness(async index => {
+      if (index === 0) await held.promise
+      else ordinaryAssembly = await mounted.ctx.systemPrompt.assemble({ agent, scope: agent })
+      return textResponse('done')
+    })
+    agent = mounted.agent
+    try {
+      await runCommand(mounted.ctx, agent, '/loop watch the job')
+      await waitFor(() => mounted.adapter.requests.length === 1, 'the iteration request')
+      agent.followup(createUserMessage({ content: 'Explain another topic.' }))
+      held.resolve()
+      await agent.whenIdle()
+      assert.equal(mounted.adapter.requests.length, 2)
+      assert.equal(ordinaryAssembly.tools.some(tool => ['schedule_next_loop', 'stop_loop'].includes(tool.name)), false)
+      assert.doesNotMatch(renderPrompt(ordinaryAssembly), /one iteration of an adaptive \/loop/u)
+      assert.equal(mounted.service.get(agent).pauseReason, 'awaiting-schedule')
+    } finally {
+      held.resolve()
+    }
+  })
+
+  it('exposes iteration tools only when the queued loop message is claimed', async () => {
+    const held = Promise.withResolvers()
+    const assemblies = []
+    const mounted = await mountAgentLoopHarness(async () => {
+      assemblies.push(await mounted.ctx.systemPrompt.assemble({ agent: mounted.agent, scope: mounted.agent }))
+      return textResponse('done')
+    })
+    const { ctx, agent, service } = mounted
+    const maintenance = agent.runMaintenance(() => held.promise)
+    try {
+      agent.followup(createUserMessage({ content: 'Answer first.' }))
+      await runCommand(ctx, agent, '/loop watch the job')
+      await waitFor(() => service.get(agent)?.pending?.phase === 'queued', 'the queued iteration')
+      held.resolve()
+      await maintenance
+      await agent.whenIdle()
+      assert.equal(assemblies.length, 2)
+      assert.equal(assemblies[0].tools.some(tool => tool.name === 'schedule_next_loop'), false)
+      assert.doesNotMatch(renderPrompt(assemblies[0]), /one iteration of an adaptive \/loop/u)
+      assert.equal(assemblies[1].tools.some(tool => tool.name === 'schedule_next_loop'), true)
+      assert.match(renderPrompt(assemblies[1]), /one iteration of an adaptive \/loop/u)
+      assert.equal(loopMessages(agent.session).length, 1)
+    } finally {
+      held.resolve()
+      await maintenance
+    }
+  })
+
+  it('rejects zero and overflowing intervals without starting a loop', async () => {
+    const { ctx, agent, service, adapter } = await mountAgentLoopHarness(() => textResponse('done'))
+    for (const interval of ['0s', '9007199254741s']) {
+      const result = await runCommand(ctx, agent, `/loop ${interval} watch the job`)
+      assert.equal(result.kind, 'error')
+      assert.equal(service.get(agent), undefined)
+    }
+    assert.equal(adapter.requests.length, 0)
   })
 })
